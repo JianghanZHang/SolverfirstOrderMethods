@@ -74,24 +74,33 @@ class SolverLBGFS(SolverAbstract):
         self.q = self.dJdu.copy()
 
         for i in range(min(self.memory_length, num_iter) - 1, -1, -1):
+            tmp = 0
             for j in range(self.problem.T):
                 # rho should be a scalar
-                self.rho[i, j] = 1 / (self.y[i][j, :].T @ self.s[i][j, :])
+                tmp += (self.y[i][j, :].T @ self.s[i][j, :])
+            self.rho[i] = 1 / tmp 
+
+            self.aux0[i] = 0
+            for j in range(self.problem.T):
                 # aux0[i, j] should be a scalar
-                self.aux0[i, j] = self.rho[i, j] * (self.s[i][j, :].T @ self.q[j, :])
-                self.q[j, :] -= self.aux0[i, j] * self.y[i][j, :]
+                self.aux0[i] += self.rho[i] * (self.s[i][j, :].T @ self.q[j, :])
+            self.q -= self.aux0[i] * self.y[i]
 
         H_init = self.init_hessian_approx(num_iter)  # Previous y is y[-2], previous s is s[-1]
 
         for j in range(self.problem.T):
             self.r[j] = H_init[j][:, :] @ self.q[j, :]
 
+        self.aux1 = 0
         for i in range(0, min(self.memory_length, num_iter), 1):
             for j in range(self.problem.T):
-                self.aux1[j] = self.rho[i, j] * self.y[i][j, :].T @ self.r[j][:]  # aux1 should be a scalar
-                self.r[j] += (self.aux0[i, j] - self.aux1[j]) * self.s[i][j, :]
+                self.aux1 += self.rho[i] * self.y[i][j, :].T @ self.r[j][:]  # aux1 should be a scalar
+            for j in range(self.problem.T):
+            # import pdb; pdb.set_trace()
+                self.r[j] += (self.aux0[i] - self.aux1) * self.s[i][j, :]
 
         self.direction = -self.r
+
     def backwardPass(self, num_iter):
 
         self.dJdx[-1, :] = self.problem.terminalData.Lx
@@ -293,10 +302,10 @@ class SolverLBGFS(SolverAbstract):
         self.s = []
         self.H0 = [np.eye(m.nu) for m in self.problem.runningModels]
         self.r = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-        self.rho = np.zeros([self.memory_length, self.problem.T])
-        self.aux0 = np.zeros([self.memory_length, self.problem.T])
-        self.aux1 = np.zeros([self.problem.T])
-        self.curvature = np.zeros([self.problem.T])
+        self.rho = np.zeros(self.memory_length)
+        self.aux0 = np.zeros(self.memory_length)
+        self.aux1 = 0
+        self.curvature = 0
         self.curvature_curr = 0.
         self.curvature_prev = 0.
         self.alphas = np.ones([self.problem.T, 1])
