@@ -26,6 +26,7 @@ class SolverLBGFS(SolverAbstract):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
         self.cost_try = 0.
+        self.cost_try_p = 0.
         self.threshold = 0.
         self.stop = 0.
         self.x_reg = 0
@@ -37,7 +38,7 @@ class SolverLBGFS(SolverAbstract):
         self.th_stop = 1.e-5
         self.n_little_improvement = 0
         self.c1 = 1e-4
-        self.c2 = 1.
+        self.c2 = .9
         #self.c = 1e-4
         self.past_grad = 0.
         self.curr_grad = 0.
@@ -45,7 +46,7 @@ class SolverLBGFS(SolverAbstract):
         self.change_p = 0.
         self.lb = 0.
         self.ub = 0.
-        self.memory_length = 1000
+        self.memory_length = 10
         self.alpha_threshold = 1e-10
         self.allocateData()
 
@@ -68,11 +69,12 @@ class SolverLBGFS(SolverAbstract):
         if recalc:
             if VERBOSE: print("Going into Calc from compute direction")
 
-        self.calc()
+        self.cost = self.calc()
         if VERBOSE: print("Going into Backward Pass from compute direction")
         self.backwardPass(num_iter) # get new dJdu
         self.q = self.dJdu.copy()
-
+        #import pdb;
+        #pdb.set_trace()
         for i in range(min(self.memory_length, num_iter) - 1, -1, -1):
             tmp = 0
             for j in range(self.problem.T):
@@ -95,9 +97,10 @@ class SolverLBGFS(SolverAbstract):
         for i in range(0, min(self.memory_length, num_iter), 1):
             for j in range(self.problem.T):
                 self.aux1 += self.rho[i] * self.y[i][j, :].T @ self.r[j][:]  # aux1 should be a scalar
-            for j in range(self.problem.T):
-            # import pdb; pdb.set_trace()
-                self.r[j] += (self.aux0[i] - self.aux1) * self.s[i][j, :]
+            # for j in range(self.problem.T):
+            #import pdb; pdb.set_trace()
+            #     self.r[j] += (self.aux0[i] - self.aux1) * self.s[i][j, :]
+            self.r += (self.aux0[i] - self.aux1) * self.s[i]
 
         self.direction = -self.r
 
@@ -117,7 +120,7 @@ class SolverLBGFS(SolverAbstract):
     def init_hessian_approx(self, num_iter):
         H_init = self.H0.copy()
 
-        return H_init
+        #return H_init
         if num_iter == 0:
             return H_init
 
@@ -130,7 +133,11 @@ class SolverLBGFS(SolverAbstract):
                 H_init[t][:, :] = (num / den) * self.H0[t][:, :].copy()
             return H_init
 
+    # This function is assume forwardPass has run with corresponding alpha
+    # (xs_try and us_try have been updated with us_try = us + alpha * direction).
     def calcCurvature(self):
+        self.problem.calc(self.xs_try, self.us_try)
+        self.problem.calcDiff(self.xs_try, self.us_try)
         curvature = 0.
         # For Wolfe condition (curvature condition)
         self.dJdx_try[-1, :] = self.problem.terminalData.Lx
@@ -138,10 +145,11 @@ class SolverLBGFS(SolverAbstract):
             self.dJdu_try[t, :] = data.Lu + data.Fu.T @ self.dJdx_try[t + 1, :]
             self.dJdx_try[t, :] = data.Lx + data.Fx.T @ self.dJdx_try[t + 1, :]
             curvature += self.dJdu_try[t, :].T @ self.direction[t, :]
-
         return curvature
 
     def calcCurvature_abs(self):
+        self.problem.calc(self.xs_try, self.us_try)
+        self.problem.calcDiff(self.xs_try, self.us_try)
         curvature_abs = 0.
         # For Wolfe condition (curvature condition)
         self.dJdx_try[-1, :] = self.problem.terminalData.Lx
@@ -150,27 +158,29 @@ class SolverLBGFS(SolverAbstract):
             self.dJdx_try[t, :] = data.Lx + data.Fx.T @ self.dJdx_try[t + 1, :]
             curvature_abs += abs(self.dJdu_try[t, :].T @ self.direction[t, :])
             print(f'in {t}th step: grad = {self.dJdu_try[t, :].T}, direction = {self.direction[t, :]}, gradTdirection= {self.dJdu[t, :].T @ self.direction[t, :]}')
-
         return curvature_abs
 
-    def forwardPass(self, alphas):
+    # This function also compute the curvature_0 (when alpha = 0) and the threshold for sufficient decrease condition.
+    def forwardPass(self, alpha):
         cost_try = 0.
         us = np.array(self.us)
-        us_try = us + alphas * self.direction
+        us_try = us + alpha * self.direction
         self.us_try = list(us_try)
         self.lb = 0.
         self.ub = 0.
         self.threshold = 0.
         self.curr_grad = 0.
+        self.curvature_0 = 0.
 
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             model.calc(data, self.xs_try[t], self.us_try[t])
-            model.calcDiff(data, self.xs_try[t], self.us_try[t])
+            #model.calcDiff(data, self.xs_try[t], self.us_try[t])
             self.xs_try[t + 1] = data.xnext
             cost_try += data.cost
 
             # For Wolfe condition (sufficient decrease)
-            self.threshold -= (self.c1 * self.dJdu[t, :].T @ (alphas * self.direction[t, :]))
+            self.threshold += (self.c1 * self.dJdu[t, :].T @ (alpha * self.direction[t, :]))
+            self.curvature_0 += self.dJdu[t, :].T @ self.direction[t, :]
 
         self.problem.terminalModel.calc(self.problem.terminalData, self.xs_try[-1])
 
@@ -178,21 +188,140 @@ class SolverLBGFS(SolverAbstract):
 
         return cost_try
 
-    def tryStep(self, alphas):
-        self.curvature_curr = 0.
-        self.curvature_prev = 0.
-        self.curvature_prev = self.calcCurvature_abs()
-        print('step:', alphas * self.direction)
-        self.cost_try = self.forwardPass(alphas)
-        self.problem.calc(self.xs_try, self.us_try)
-        self.problem.calcDiff(self.xs_try, self.us_try)
-        self.curvature_curr = self.calcCurvature_abs()
-        print('curvature_prev:', self.curvature_prev)
-        print('curvature_curr:', self.curvature_curr)
+    def tryStep(self):
+        # self.curvature_curr = 0.
+        # self.curvature_prev = 0.
+        # self.curvature_prev = self.calcCurvature_abs()
+        # self.cost = self.cost_try
+        satisfied = self.lineSearch()
 
+        return satisfied #self.cost - self.cost_try
 
+    def lineSearch(self):
+        # Throughout the line search, alpha should be monotonically increasing
+        # self.cost is cost(alpha = 0)
+        # Note: curvatures should be scalar
+        self.alpha_max = 1.
+        self.alpha = .5
+        self.alpha_p = 0.
 
-        return self.cost - self.cost_try
+        print(f'Going into forwardPass from lineSearch initialization using alpha = max_alpha.')
+        cost_try_max = self.forwardPass(self.alpha_max)
+        curvature_max = self.calcCurvature()
+
+        print(f'Going into forwardPass from lineSearch initialization using alpha = current_alpha.')
+        self.cost_try = self.forwardPass(self.alpha)
+        self.curvature_curr = self.calcCurvature()
+
+        # Computing costs and curvatures for alpha_1 and alpha_0 before going into the loop
+        self.cost_try_p = self.cost
+        self.curvature_prev = self.curvature_0
+
+        for i in range(0, 16):
+            print(f'in iteration {i}:')
+            print(f'current_alpha: {self.alpha}')
+            print(f'cost_try: {self.cost_try}; curvature(current_alpha): {self.curvature_curr}')
+            print(f'cost: {self.cost}; curvature(0): {self.curvature_0}')
+            print(f'cost_try_previous: {self.cost_try_p}')
+
+            if self.cost_try > self.cost + self.c1 * self.alpha * self.curvature_0 or (self.cost_try >= self.cost_try_p and i > 0):
+                # sufficient decrease was not satisfied
+                print(f'going into zoom because sufficient decrease was not satisfied.')
+                return self.zoom(self.alpha_p, self.alpha, reversed=False)
+
+            if self.curvature_curr >= self.c2 * self.curvature_0:  # curvature(alpha = 0) is from forwardPass
+                print('line search succeed.')
+                # current alpha satisfy Wolfe condition -> stop line search
+                return True
+
+            if self.curvature_curr >= 0:  # alphas_i overshoot -> going into reverse zoom
+                print(f'in iteration {i}, going into zoom because current curvature is positive.')
+                return self.zoom(self.alpha, self.alpha_p, reverse=True)
+
+            self.alpha_p = self.alpha
+            #self.alpha *= 2
+            self.alpha = self.cubicInterpolation(self.alpha, self.alpha_max, self.curvature_curr, curvature_max, self.cost_try, cost_try_max)
+
+            self.cost_try_p = self.cost_try  # record cost(alpha_i-1) before computing new cost
+            self.cost_try = self.forwardPass(self.alpha)
+            # Computing new cost(alpha_i), now us_try=us + alpha_i*direction, and (xs_try, us_try) is feasible.
+
+            self.curvature_prev = self.curvature_curr  # record curvature(alpha_i-1)
+            self.curvature_curr = self.calcCurvature()
+            # Computing new curvature(alpha_i), the curvature was computed using us_try=us + alpha_i*direction.
+
+        return False
+
+    def zoom(self, alpha_lo, alpha_hi, reversed):
+
+        # initialize the algorithm
+        if reversed:  # This is the case: zoom(alpha_i, alpha_i-1)
+            curvature_lo = self.curvature_curr
+            curvature_hi = self.curvature_prev
+            cost_try_lo = self.cost_try
+            cost_try_hi = self.cost_try_p
+        else:  # This is the case: zoom(alpha_i-1, alpha_i)
+            curvature_lo = self.curvature_prev
+            curvature_hi = self.curvature_curr
+            cost_try_lo = self.cost_try_p
+            cost_try_hi = self.cost_try
+
+        for i in range(0, 16):
+            self.alpha = self.cubicInterpolation(alpha_lo, alpha_hi, curvature_lo, curvature_hi, cost_try_lo, cost_try_hi)
+            print(f'in zoom, current interpolated alpha: {self.alpha}. With [alpha_lo, alpha_hi] = [{alpha_lo}, {alpha_hi}]')
+
+            self.cost_try = self.forwardPass(self.alpha)  # now us_try = us + alpha * direction
+            self.curvature_curr = self.calcCurvature()
+            print(f'in iteration {i}:')
+            print(f'current_alpha: {self.alpha}')
+            print(f'cost_try: {self.cost_try}; curvature(current_alpha): {self.curvature_curr}')
+            print(f'cost: {self.cost}; curvature(0): {self.curvature_0}')
+            #print(f'direction: {self.direction},\n grad: {self.dJdu}')
+
+            if self.cost_try > self.cost + self.c1 * self.alpha * self.curvature_0 or self.cost_try >= cost_try_lo:
+                print(f'sufficient decrease condition was not satisfied in zoom, changing upper bound of alpha to current alpha.')
+                alpha_hi = self.alpha
+                curvature_hi = self.curvature_curr
+                cost_try_hi = self.cost_try
+
+            else:
+
+                if self.curvature_curr >= self.c2 * self.curvature_0:
+                    # current alpha satisfy the Wolfe condition -> stop line search
+                    print(f'line search -> zoom succeed.')
+                    return True
+
+                if self.curvature_curr * (alpha_hi - alpha_lo) >= 0:
+                    print(f'reversing interval of alpha')
+                    alpha_hi = alpha_lo
+                    curvature_hi = curvature_lo
+                    cost_try_hi = cost_try_lo
+
+                alpha_lo = self.alpha
+                curvature_lo = self.curvature_curr
+                cost_try_lo = self.cost_try
+                print(f'sufficient decrease condition was satisfied, '
+                      f'but the curvature condition was not -> changing lower bound of alpha to current alpha.')
+
+                # cost_try_lo = self.forwardPass(alpha_lo)  # now us_try = us + alpha_lo * direction
+                # curvature_lo = self.calcCurvature()
+        return False
+
+    def cubicInterpolation(self, alpha_l, alpha_r, curvature_l, curvature_r, cost_try_l, cost_try_r):
+        # Note: it is possible to have alpha_i < alpha_i-1
+        print('in cubicInterpolation:')
+
+        d1 = curvature_l + curvature_r - 3 * (cost_try_l - cost_try_r) / (alpha_l - alpha_r)
+
+        d2 = np.sign(alpha_r - alpha_l) * (d1**2 - curvature_l * curvature_r) ** .5
+
+        print(f'd1: {d1}, d2: {d2}')
+        print(f'alpha_l: {alpha_l}, alpha_r: {alpha_r}, curvature_l: {curvature_l}, curvature_r: {curvature_r}, cost_try_l: {cost_try_l}, cost_try_r: {cost_try_r}')
+        alpha = alpha_r - (alpha_r - alpha_l) * ((curvature_r + d2 - d1) / (curvature_r - curvature_l + 2 * d2))
+
+        # if alpha - alpha_l < 1e-6 or alpha_r - alpha < 1e-6:
+        #     alpha = alpha_r / 2
+        return alpha
 
     def solve(self, init_xs=None, init_us=None, maxIter=10000, isFeasible=True):
         # ___________________ Initialize ___________________#
@@ -222,53 +351,36 @@ class SolverLBGFS(SolverAbstract):
                     raise BaseException("Backward Pass Failed")
                 break
 
-            alphas = 1
-
-            while True:  # forward pass with line search
-
+            while True:  # Going into line search
                 try:
                     print(f'######################## Going into tryStep @ iteration {i} ##########################')
-                    print('alpha:', alphas)
-                    dV = self.tryStep(alphas)
+                    satisfied = self.tryStep()
                 except:
                     # repeat starting from a smaller alpha
-                    print("Try Step Failed for alpha = %s" % alphas)
+                    print("Try Step Failed for alpha = %s" % self.alpha)
                     raise BaseException("Forward Pass Failed")
                     continue
 
-                print('dV:', dV)
-                curvature_cond_satisfied = self.curvature_curr <= self.curvature_prev
+                break
 
-                if dV >= max(self.threshold, 0) and curvature_cond_satisfied:
-                    print(f'in {i}th iteration:')
-                    print("step accepted for alpha = %s \n new cost is %s" % (alphas, self.cost_try))
-                    if i < self.memory_length:  # keep track of the most recent m steps
-                        self.s.append(alphas * self.direction)
-                    else:
-                        self.s.append(alphas * self.direction)
-                        self.s.pop(0)
+            print('Satisfied:', satisfied)
 
-                    self.setCandidate(self.xs_try, self.us_try, isFeasible)
-                    self.cost = self.cost_try
-                    self.alphas_p = alphas
-                    if dV < 1.e-12:
-                        self.n_little_improvement += 1
-                        print("little improvements")
+            if satisfied:
+                print(f'in {i}th iteration:')
+                print("step accepted for alpha = %s \n new cost is %s" % (self.alpha, self.cost_try))
+                if i < self.memory_length:  # keep track of the most recent m steps
+                    self.s.append(self.alpha * self.direction)
+                else:
+                    self.s.append(self.alpha * self.direction)
+                    self.s.pop(0)
 
-                    break
+                self.dV = self.cost - self.cost_try
+                self.setCandidate(self.xs_try, self.us_try, isFeasible)
+                self.cost = self.cost_try
 
-                update_mask = .5
-
-                self.calc()  # recalc
-
-                alphas *= update_mask
-                # print('alphas after update:', alphas)
-                print('step length failed.')
-
-
-                if alphas <= self.alpha_threshold:
-                    print("No decrease found")
-                    return False
+            else:
+                print('line search failed')
+                return False
 
             self.stoppingCriteria()
 
@@ -278,7 +390,10 @@ class SolverLBGFS(SolverAbstract):
 
         return False
 
+
     def stoppingCriteria(self):
+        if self.dV < 1e-12:
+            self.n_little_improvement += 1
         self.stop = 0
         T = self.problem.T
         for t in range(T):
@@ -295,7 +410,6 @@ class SolverLBGFS(SolverAbstract):
         self.q = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
         self.dJdx_try = np.array([np.zeros(m.state.ndx) for m in self.models()])
-        self.alpha_p = 0
         self.direction = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.direction_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.y = []
@@ -305,10 +419,19 @@ class SolverLBGFS(SolverAbstract):
         self.rho = np.zeros(self.memory_length)
         self.aux0 = np.zeros(self.memory_length)
         self.aux1 = 0
-        self.curvature = 0
+        #self.curvature = 0
         self.curvature_curr = 0.
         self.curvature_prev = 0.
-        self.alphas = np.ones([self.problem.T, 1])
+        self.curvature_0 = 0.
+        self.alpha = 0.
+        self.alpha_p = 0.
+        self.alpha_lo = 0.
+        self.alpha_hi = 0.
+        self.alpha_max = 1.
+        self.curvature_lo = 0.
+        self.curvature_hi = 0.
+        self.cost_try_lo = 0.
+        self.cost_try_hi = 0.
 
     def numDiff_grad(self, epsilon=1e-10):
         # initialize states and controls
@@ -341,6 +464,7 @@ class SolverLBGFS(SolverAbstract):
         print('numDiff_grad:', cost_grad)
 
         return cost_grad
+
 
 
 
