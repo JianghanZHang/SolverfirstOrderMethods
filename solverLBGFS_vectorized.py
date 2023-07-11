@@ -431,7 +431,6 @@ class SolverLBGFS(SolverAbstract):
             if VERBOSE: print(f'gradient norm: {self.stop}')
 
             if self.n_little_improvement >= 1 or self.stop < self.th_stop:
-            #if self.stop < self.th_stop:
                 print('Converged')
                 return True
 

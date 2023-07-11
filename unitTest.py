@@ -166,9 +166,7 @@ if __name__ == '__main__':
     ax4.plot(tester.LBFGS.alphas, color=color)
     ax4.tick_params(axis='y', labelcolor=color)
 
-
-
-    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    fig.tight_layout()
     plt.show()
     pdb.set_trace()
 
