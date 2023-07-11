@@ -47,7 +47,7 @@ class SolverLBGFS(SolverAbstract):
         self.change_p = 0.
         self.lb = 0.
         self.ub = 0.
-        self.memory_length = 10000000
+        self.memory_length = 100
         self.alpha_threshold = 1e-10
         self.allocateData()
 
