@@ -164,6 +164,8 @@ class SolverILqr(SolverAbstract):
 
             self.stoppingCriteria()
 
+            self.numIter += 1
+
             if self.n_little_improvement >= 1 or self.stop < self.th_stop:
                 print('Converged')
                 return True
@@ -192,3 +194,4 @@ class SolverILqr(SolverAbstract):
         self.dv = [0. for _ in self.models()]
         self.K = [np.zeros([m.nu, m.state.ndx]) for m in self.problem.runningModels]
         self.k = [np.zeros([m.nu]) for m in self.problem.runningModels]
+        self.numIter = 0
