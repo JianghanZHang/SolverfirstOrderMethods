@@ -6,8 +6,6 @@ import crocoddyl
 from crocoddyl import SolverAbstract
 import pdb
 
-LINE_WIDTH = 100
-
 VERBOSE = False
 
 
@@ -34,7 +32,7 @@ class SolverLBGFS(SolverAbstract):
         self.regMax = 1e9
         self.regMin = 1e-9
         self.th_step = .5
-        self.th_stop = 1e-3
+        self.th_stop = 1e-6
         self.n_little_improvement = 0
         self.c1 = 1e-2
         self.c2 = 0.9
@@ -98,8 +96,8 @@ class SolverLBGFS(SolverAbstract):
 
         self.dJdx[-1, :] = self.problem.terminalData.Lx
         for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
-            self.dJdu[t, :] = data.Lu + data.Fu.T @ self.dJdx[t + 1, :]
-            self.dJdx[t, :] = data.Lx + data.Fx.T @ self.dJdx[t + 1, :]
+            self.dJdu[t, :] = data.Lu + self.dJdx[t + 1, :] @ data.Fu
+            self.dJdx[t, :] = data.Lx + self.dJdx[t + 1, :] @ data.Fx
 
         if num_iter != 0:
             if num_iter - 1 < self.memory_length:
@@ -109,10 +107,13 @@ class SolverLBGFS(SolverAbstract):
                 self.y_flat[:-1] = self.y_flat[1:]
                 self.y_flat[-1] = (self.dJdu - self.dJdu_p).flatten()
 
+        self.kkt = np.max(abs(self.dJdu))
+        print(f'KKT = {self.kkt}')
+        self.KKTs.append(self.kkt)
+
     def init_hessian_approx(self, num_iter):
-        K = 1
-        r = 1
-        #return 1
+        K = 10
+        r = .5
         if num_iter < 1:
             gamma = 1
             self.gammas.append(gamma)
@@ -124,7 +125,6 @@ class SolverLBGFS(SolverAbstract):
             gamma = num / den
             self.gammas.append(gamma)
             return K * gamma ** r
-
         else:
             num = self.y_flat[-1].T @ self.s_flat[-1]  # should be a scalar
             den = self.y_flat[-1].T @ self.y_flat[-1]  # should be a scalar
@@ -195,7 +195,7 @@ class SolverLBGFS(SolverAbstract):
         if numIter >= 1: #self.memory_length:
             self.guess = (2 * (self.cost - self.cost_p) / self.curvature_0)
             #self.guess = self.alpha_prevIter * (self.curvature_prev / self.curvature_0)
-            self.guess = 1
+            #self.guess = 1
             self.guesses.append(self.guess)
             print(f'guess= {self.guess}')
             self.alpha = self.guess
@@ -336,13 +336,11 @@ class SolverLBGFS(SolverAbstract):
             print(f'alpha_l: {alpha_l}, alpha_r: {alpha_r}, curvature_l: {curvature_l}, curvature_r: {curvature_r}, cost_try_l: {cost_try_l}, cost_try_r: {cost_try_r}')
         alpha = alpha_r - (alpha_r - alpha_l) * ((curvature_r + d2 - d1) / (curvature_r - curvature_l + 2 * d2))
 
-        if abs(alpha - alpha_l) < 1e-8 or abs(alpha - alpha_r) < 1e-8:
+        if abs(alpha - alpha_l) < 1e-8 or abs(alpha - alpha_r) < 1e-8 or np.isnan(d1) or np.isnan(d2):
             if VERBOSE: print(f'bad interpolation, using a safeguarded alpha')
             return max(alpha_l, alpha_r) / 2
 
         return alpha
-
-
 
     def solve(self, init_xs=None, init_us=None, maxIter=10000, isFeasible=True):
         # ___________________ Initialize ___________________#
@@ -357,6 +355,7 @@ class SolverLBGFS(SolverAbstract):
         self.setCandidate(init_xs, init_us, False)
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
+        self.costs.append(self.cost)
 
         print("initial cost is %s" % self.cost)
 
@@ -371,6 +370,11 @@ class SolverLBGFS(SolverAbstract):
                     print('In', i, 'th iteration.')
                     raise BaseException("Backward Pass Failed")
                 break
+
+            # if self.n_little_improvement >= 1 or self.kkt < self.th_stop:
+            if self.kkt < self.th_stop:
+                print('Converged')
+                return True
 
             while True:  # Going into line search
                 try:
@@ -406,11 +410,7 @@ class SolverLBGFS(SolverAbstract):
                 return False
 
             self.stoppingCriteria()
-            if VERBOSE: print(f'gradient norm: {self.stop}')
-
-            if self.n_little_improvement >= 1 or self.stop < self.th_stop:
-                print('Converged')
-                return True
+            #if VERBOSE: print(f'gradient norm: {self.stop}')
 
         return False
 
@@ -418,10 +418,11 @@ class SolverLBGFS(SolverAbstract):
         if self.dV < 1e-12:
             self.n_little_improvement += 1
             print('Little improvement.')
-        self.stop = 0
-        T = self.problem.T
-        for t in range(T):
-            self.stop += linalg.norm(self.dJdu[t])
+
+        # self.stop = 0
+        # T = self.problem.T
+        # for t in range(T):
+        #     self.stop += linalg.norm(self.dJdu[t])
 
     def allocateData(self):
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
@@ -470,6 +471,8 @@ class SolverLBGFS(SolverAbstract):
         self.gammas = []
         self.guess = -1
         self.guesses = []
+        self.KKTs = []
+        self.kkt = 0.
 
     def numDiff_grad(self, epsilon=1e-10):
         # initialize states and controls

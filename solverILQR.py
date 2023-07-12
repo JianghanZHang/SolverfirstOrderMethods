@@ -35,7 +35,7 @@ class SolverILqr(SolverAbstract):
         self.regMax = 1e9
         self.regMin = 1e-9
         self.th_step = .5
-        self.th_stop = 1.e-5
+        self.th_stop = 1e-6
         self.n_little_improvement = 0
         self.allocateData()
 
@@ -90,6 +90,11 @@ class SolverILqr(SolverAbstract):
 
             self.Vxx[t][:, :] = self.Qxx[t] + self.Qux[t].T @ self.K[t]
 
+        Qu = np.array(self.Qu)
+        self.kkt = np.max(abs(Qu))
+        self.KKTs.append(self.kkt+1e-12)
+
+
     def forwardPass(self, alpha):
         cost_try = 0.
 
@@ -127,6 +132,8 @@ class SolverILqr(SolverAbstract):
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
 
+        self.costs.append(self.cost)
+
         # print("initial cost is %s" % self.cost)
 
         for i in range(maxIter):
@@ -139,6 +146,10 @@ class SolverILqr(SolverAbstract):
                     print('In', i, 'th iteration.')
                     raise BaseException("Backward Pass Failed")
                 break
+
+            if self.kkt < self.th_stop:
+                print('Converged')
+                return True
 
             for a in self.alphas:  # forward pass with line search
                 try:
@@ -153,6 +164,7 @@ class SolverILqr(SolverAbstract):
                     # print("step accepted for alpha = %s \n new cost is %s" % (a, self.cost_try))
                     self.setCandidate(self.xs_try, self.us_try, isFeasible)
                     self.cost = self.cost_try
+                    self.costs.append(self.cost)
                     if dV < 1.e-12:
                         self.n_little_improvement += 1
                         print("little improvements")
@@ -162,24 +174,26 @@ class SolverILqr(SolverAbstract):
                     print("No decrease found")
                     return False
 
-            self.stoppingCriteria()
+            #self.stoppingCriteria()
 
             self.numIter += 1
 
-            if self.n_little_improvement >= 1 or self.stop < self.th_stop:
-                print('Converged')
-                return True
+           #if self.n_little_improvement >= 1 or self.kkt < self.th_stop:
 
         return False
 
     def stoppingCriteria(self):
-        self.stop = 0
-        T = self.problem.T
-        for t in range(T):
-            self.stop += linalg.norm(self.Qu[t])
+        pass
+        # self.stop = 0
+        # T = self.problem.T
+        # for t in range(T):
+        #     self.stop += linalg.norm(self.Qu[t])
 
     def allocateData(self):
 
+        self.kkt = 0.
+        self.KKTs = []
+        self.costs = []
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
         self.xs_try[0][:] = self.problem.x0.copy()
         self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]
