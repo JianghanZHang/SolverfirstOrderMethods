@@ -5,9 +5,10 @@ import scipy.linalg as scl
 import crocoddyl
 from crocoddyl import SolverAbstract
 import pdb
+import time
 
+DEBUGGING = False
 VERBOSE = False
-
 
 def rev_enumerate(l):
     return reversed(list(enumerate(l)))
@@ -19,7 +20,7 @@ def raiseIfNan(A, error=None):
         raise error
 
 class SolverLBGFS(SolverAbstract):
-    def __init__(self, shootingProblem):
+    def __init__(self, shootingProblem, memory_length = 30):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
         self.cost_try = 0.
@@ -32,10 +33,10 @@ class SolverLBGFS(SolverAbstract):
         self.regMax = 1e9
         self.regMin = 1e-9
         self.th_step = .5
-        self.th_stop = 1e-6
+        self.th_stop = 1e-5
         self.n_little_improvement = 0
-        self.c1 = 1e-2
-        self.c2 = 0.9
+        self.c1 = 1e-4
+        self.c2 = 0.8
         # self.c = 1e-4
         self.past_grad = 0.
         self.curr_grad = 0.
@@ -43,7 +44,7 @@ class SolverLBGFS(SolverAbstract):
         self.change_p = 0.
         self.lb = 0.
         self.ub = 0.
-        self.memory_length = 100
+        self.memory_length = memory_length
         self.alpha_threshold = 1e-10
         self.numIter = 0
         self.allocateData()
@@ -65,10 +66,10 @@ class SolverLBGFS(SolverAbstract):
         self.dJdu_p = self.dJdu.copy()
 
         if recalc:
-            if VERBOSE: print("Going into Calc from compute direction")
+            if DEBUGGING: print("Going into Calc from compute direction")
 
         self.calc()
-        if VERBOSE: print("Going into Backward Pass from compute direction")
+        if DEBUGGING: print("Going into Backward Pass from compute direction")
         self.backwardPass(numIter)  # get new dJdu
 
         self.q = self.dJdu.copy()
@@ -82,7 +83,7 @@ class SolverLBGFS(SolverAbstract):
         H_init = self.init_hessian_approx(numIter)  # Previous y is y[-2], previous s is s[-1]
 
         r_flat = H_init * q_flat
-        print(f'norm of r_init: {np.linalg.norm(r_flat)}.')
+        if VERBOSE: print(f'norm of r_init: {np.linalg.norm(r_flat)}.')
 
         for i in range(0, min(self.memory_length, numIter), 1):
             aux1 = self.rho[i] * (self.y_flat[i].T @ r_flat)
@@ -90,7 +91,7 @@ class SolverLBGFS(SolverAbstract):
 
         self.direction = -r_flat.reshape(self.q.shape)
         self.directions.append(np.linalg.norm(self.direction))
-        print(f'norm of direction: {np.linalg.norm(self.direction)}.')
+        if VERBOSE: print(f'norm of direction: {np.linalg.norm(self.direction)}.')
 
     def backwardPass(self, num_iter):
 
@@ -107,8 +108,8 @@ class SolverLBGFS(SolverAbstract):
                 self.y_flat[:-1] = self.y_flat[1:]
                 self.y_flat[-1] = (self.dJdu - self.dJdu_p).flatten()
 
-        self.kkt = np.max(abs(self.dJdu))
-        print(f'KKT = {self.kkt}')
+        self.Qu = self.dJdu
+        self.kkt = linalg.norm(self.dJdu, 2)
         self.KKTs.append(self.kkt)
 
     def init_hessian_approx(self, num_iter):
@@ -180,13 +181,13 @@ class SolverLBGFS(SolverAbstract):
 
     def lineSearch(self, numIter):
 
-        if VERBOSE: print(f'Going into forwardPass from lineSearch initialization using alpha = current_alpha.')
+        if DEBUGGING: print(f'Going into forwardPass from lineSearch initialization using alpha = current_alpha.')
         self.cost_try = self.forwardPass(self.alpha)
         self.curvature_curr = self.calcCurvature()
 
         self.alpha_max = 1.
         self.alpha_p = 0.
-        self.k = 15
+        self.k = 10
         self.alpha = 2 ** (-self.k)
 
         cost_try_max = self.forwardPass(self.alpha_max)
@@ -197,7 +198,7 @@ class SolverLBGFS(SolverAbstract):
             #self.guess = self.alpha_prevIter * (self.curvature_prev / self.curvature_0)
             #self.guess = 1
             self.guesses.append(self.guess)
-            print(f'guess= {self.guess}')
+            if VERBOSE: (f'guess= {self.guess}')
             self.alpha = self.guess
 
         # Computing costs and curvatures for alpha_1 and alpha_0 before going into the loop
@@ -214,42 +215,40 @@ class SolverLBGFS(SolverAbstract):
             self.curvature_curr = self.calcCurvature()
             # Computing new curvature(alpha_i), the curvature was computed using us_try=us + alpha_i*direction.
 
-            if VERBOSE:
-                print(f'in iteration {i}:')
-                print(f'current_alpha: {self.alpha}, direction:{self.direction}')
-                print(f'cost_try: {self.cost_try}; curvature(current_alpha): {self.curvature_curr}')
-                print(f'cost: {self.cost}; curvature(0): {self.curvature_0}')
-                print(f'cost_try_previous: {self.cost_try_p}')
+            # if DEBUGGING:
+            #     print(f'in iteration {i}:')
+            #     print(f'current_alpha: {self.alpha}, direction:{self.direction}')
+            #     print(f'cost_try: {self.cost_try}; curvature(current_alpha): {self.curvature_curr}')
+            #     print(f'cost: {self.cost}; curvature(0): {self.curvature_0}')
+            #     print(f'cost_try_previous: {self.cost_try_p}')
 
             if self.cost_try > self.cost + self.c1 * self.alpha * self.curvature_0 or \
                     (self.cost_try >= self.cost_try_p and i > 1) or np.isnan(self.cost_try):
                 # sufficient decrease was not satisfied
                 if i != 0:
-                    if VERBOSE: print(f'going into zoom because sufficient decrease condition failed.')
+                    #if DEBUGGING: print(f'going into zoom because sufficient decrease condition failed.')
                     return self.zoom(reversed=False)
                 else:
-                    if VERBOSE: print(f'reset alpha')
+                    #if DEBUGGING: print(f'reset alpha')
                     self.alpha_p = 0
                     self.alpha = 2 ** (-self.k)
                     continue
 
             if abs(self.curvature_curr) <= -self.c2 * self.curvature_0:  # curvature(alpha = 0) is from forwardPass
-                print('line search succeed.')
+                #if VERBOSE: print('line search succeed.')
                 self.alpha_prevIter = self.alpha
-                if i == 0:
-                    self.initial_alpha_accepted.append(numIter)
                 # current alpha satisfy Wolfe condition -> stop line search
                 return True
 
-            if VERBOSE: print(f'curvature condition failed.')
+            if DEBUGGING: print(f'curvature condition failed.')
 
             if self.curvature_curr >= 0:
                 # alphas_i overshoot -> going into reversed zoom
                 if i != 0:
-                    if VERBOSE: print(f'in iteration {i}, going into zoom because current curvature is positive.')
+                    #if DEBUGGING: print(f'in iteration {i}, going into zoom because current curvature is positive.')
                     return self.zoom(reversed=True)
                 else:
-                    if VERBOSE: print(f'reset alpha')
+                    #if DEBUGGING: print(f'reset alpha')
                     self.alpha_p = 0
                     self.alpha = 2 ** (-self.k)
                     continue
@@ -285,7 +284,7 @@ class SolverLBGFS(SolverAbstract):
             self.cost_try = self.forwardPass(self.alpha)  # now us_try = us + alpha * direction
             self.curvature_curr = self.calcCurvature()
 
-            if VERBOSE:
+            if DEBUGGING:
                 print(
                     f'in zoom, current interpolated alpha: {self.alpha}. With [alpha_lo, alpha_hi] = [{alpha_lo}, {alpha_hi}]')
                 print(f'in iteration {i}:')
@@ -294,7 +293,7 @@ class SolverLBGFS(SolverAbstract):
                 print(f'cost: {self.cost}; curvature(0): {self.curvature_0}')
 
             if self.cost_try > self.cost + self.c1 * self.alpha * self.curvature_0 or self.cost_try >= cost_try_lo:
-                if VERBOSE:
+                if DEBUGGING:
                     print(f'sufficient decrease condition was not satisfied in zoom, changing upper bound of alpha to current alpha.')
                 alpha_hi = self.alpha
                 curvature_hi = self.curvature_curr
@@ -303,12 +302,12 @@ class SolverLBGFS(SolverAbstract):
             else:
                 if abs(self.curvature_curr) <= -self.c2 * self.curvature_0:
                     # current alpha satisfy the Wolfe condition -> stop line search
-                    print(f'line search -> zoom succeed.')
+                    if VERBOSE: print(f'line search -> zoom succeed.')
                     self.alpha_prevIter = self.alpha
                     return True
 
                 if self.curvature_curr * (alpha_hi - alpha_lo) >= 0:
-                    if VERBOSE: print(f'reversing interval of alpha')
+                    if DEBUGGING: print(f'reversing interval of alpha')
                     alpha_hi = alpha_lo
                     curvature_hi = curvature_lo
                     cost_try_hi = cost_try_lo
@@ -316,7 +315,7 @@ class SolverLBGFS(SolverAbstract):
                 alpha_lo = self.alpha
                 curvature_lo = self.curvature_curr
                 cost_try_lo = self.cost_try
-                if VERBOSE: print(f'sufficient decrease condition was satisfied, '
+                if DEBUGGING: print(f'sufficient decrease condition was satisfied, '
                       f'but the curvature condition was not -> changing lower bound of alpha to current alpha.')
         return False
 
@@ -325,19 +324,18 @@ class SolverLBGFS(SolverAbstract):
 
         #return min(alpha_l, alpha_r) + .1 * max(alpha_r, alpha_l)
 
-        if VERBOSE: print('in cubicInterpolation:')
+        if DEBUGGING: print('in cubicInterpolation:')
 
         d1 = curvature_l + curvature_r - 3 * ((cost_try_l - cost_try_r) / (alpha_l - alpha_r))
-
         d2 = np.sign(alpha_r - alpha_l) * ((d1**2 - curvature_l * curvature_r) ** .5)
 
-        if VERBOSE:
+        if DEBUGGING:
             print(f'd1: {d1}, d2: {d2}')
             print(f'alpha_l: {alpha_l}, alpha_r: {alpha_r}, curvature_l: {curvature_l}, curvature_r: {curvature_r}, cost_try_l: {cost_try_l}, cost_try_r: {cost_try_r}')
         alpha = alpha_r - (alpha_r - alpha_l) * ((curvature_r + d2 - d1) / (curvature_r - curvature_l + 2 * d2))
 
         if abs(alpha - alpha_l) < 1e-8 or abs(alpha - alpha_r) < 1e-8 or np.isnan(d1) or np.isnan(d2):
-            if VERBOSE: print(f'bad interpolation, using a safeguarded alpha')
+            if DEBUGGING: print(f'bad interpolation, using a safeguarded alpha')
             return max(alpha_l, alpha_r) / 2
 
         return alpha
@@ -352,14 +350,20 @@ class SolverLBGFS(SolverAbstract):
         init_xs[0][:] = self.problem.x0.copy()  # Initial condition guess must be x0
         self.xs_try[0][:] = self.problem.x0.copy()
 
-        self.setCandidate(init_xs, init_us, False)
+        if not isFeasible:
+            init_xs = self.problem.rollout(init_us)
+
+        self.setCandidate(init_xs, init_us, True)
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
         self.costs.append(self.cost)
 
-        print("initial cost is %s" % self.cost)
+        if VERBOSE: print("initial cost is %s" % self.cost)
+
+        self.guess_accepted = []
 
         for i in range(maxIter):
+            start_time = time.time()
             self.numIter = i
             recalc = True  # this will recalculate derivatives in computeDirection
             while True:  # backward pass
@@ -378,7 +382,7 @@ class SolverLBGFS(SolverAbstract):
 
             while True:  # Going into line search
                 try:
-                    print(f'######################## Going into tryStep @ iteration {i} ##########################')
+                    if VERBOSE: print(f'######################## Going into tryStep @ iteration {i} ##########################')
                     satisfied = self.tryStep(i)
                 except:
                     # repeat starting from a smaller alpha
@@ -387,11 +391,10 @@ class SolverLBGFS(SolverAbstract):
                     continue
                 break
 
-            print('Satisfied:', satisfied)
-
             if satisfied:
-                print(f'in {i}th iteration:')
-                print("step accepted for alpha = %s \n new cost is %s" % (self.alpha, self.cost_try))
+                if VERBOSE:
+                    print(f'in {i}th iteration:')
+                    print("step accepted for alpha = %s \n new cost is %s" % (self.alpha, self.cost_try))
                 self.alphas.append(self.alpha)
                 if i < self.memory_length:  # keep track of the most recent m steps
                     self.s_flat[i] = (self.alpha * self.direction).flatten()
@@ -406,23 +409,26 @@ class SolverLBGFS(SolverAbstract):
                 self.costs.append(self.cost)
 
             else:
-                if VERBOSE: print('line search failed')
+                if DEBUGGING: print('line search failed')
                 return False
 
+            if self.alpha == self.guess:
+                self.guess_accepted.append(True)
+            else:
+                self.guess_accepted.append(False)
+
+
             self.stoppingCriteria()
-            #if VERBOSE: print(f'gradient norm: {self.stop}')
+            end_time = time.time()
+            self.times.append(end_time - start_time)
 
         return False
 
     def stoppingCriteria(self):
         if self.dV < 1e-12:
             self.n_little_improvement += 1
-            print('Little improvement.')
+            if VERBOSE: print('Little improvement.')
 
-        # self.stop = 0
-        # T = self.problem.T
-        # for t in range(T):
-        #     self.stop += linalg.norm(self.dJdu[t])
 
     def allocateData(self):
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
@@ -466,6 +472,7 @@ class SolverLBGFS(SolverAbstract):
         self.h = 1.
         self.initial_alpha_accepted = []
         self.gamma_accepted = []
+        self.guess_accepted = []
         self.costs = []
         self.alphas = []
         self.gammas = []
@@ -473,6 +480,7 @@ class SolverLBGFS(SolverAbstract):
         self.guesses = []
         self.KKTs = []
         self.kkt = 0.
+        self.times = []
 
     def numDiff_grad(self, epsilon=1e-10):
         # initialize states and controls

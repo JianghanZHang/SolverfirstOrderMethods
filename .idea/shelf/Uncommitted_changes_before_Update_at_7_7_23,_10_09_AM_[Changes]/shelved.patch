@@ -1,0 +1,216 @@
+Index: solverLBFGS.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import numpy as np\nfrom numpy import linalg\n\nimport scipy.linalg as scl\nimport crocoddyl\nfrom crocoddyl import SolverAbstract\n\nLINE_WIDTH = 100\n\nVERBOSE = False\n\n\ndef rev_enumerate(l):\n    return reversed(list(enumerate(l)))\n\n\ndef raiseIfNan(A, error=None):\n    if error is None:\n        error = scl.LinAlgError(\"NaN in array\")\n    if np.any(np.isnan(A)) or np.any(np.isinf(A)) or np.any(abs(np.asarray(A)) > 1e30):\n        raise error\n\n\nclass SolverLBGFS(SolverAbstract):\n    def __init__(self, shootingProblem):\n        SolverAbstract.__init__(self, shootingProblem)\n        self.cost = 0.\n        self.cost_try = 0.\n        self.threshold = 0.\n        self.stop = 0.\n        self.x_reg = 0\n        self.u_reg = 0\n        self.regFactor = 10\n        self.regMax = 1e9\n        self.regMin = 1e-9\n        self.th_step = .5\n        self.th_stop = 1.e-5\n        self.n_little_improvement = 0\n        self.c1 = 1e-4\n        self.c2 = 1.\n        #self.c = 1e-4\n        self.past_grad = 0.\n        self.curr_grad = 0.\n        self.change = 0.\n        self.change_p = 0.\n        self.lb = 0.\n        self.ub = 0.\n        self.memory_length = 1000\n        self.alpha_threshold = 1e-10\n        self.allocateData()\n\n    def models(self):\n        mod = [m for m in self.problem.runningModels]\n        mod += [self.problem.terminalModel]\n        return mod\n\n    def calc(self):\n        # compute cost and derivatives at deterministic nonlinear trajectory\n        self.problem.calc(self.xs, self.us)\n        cost = self.problem.calcDiff(self.xs, self.us)\n        return cost\n\n    def computeDirection(self, num_iter, recalc=True):\n\n        self.direction_p = self.direction.copy()\n        self.dJdu_p = self.dJdu.copy()\n\n        if recalc:\n            if VERBOSE: print(\"Going into Calc from compute direction\")\n\n        self.calc()\n        if VERBOSE: print(\"Going into Backward Pass from compute direction\")\n        self.backwardPass(num_iter) # get new dJdu\n        self.q = self.dJdu.copy()\n\n        for i in range(min(self.memory_length, num_iter) - 1, -1, -1):\n            for j in range(self.problem.T):\n                # rho should be a scalar\n                self.rho[i, j] = 1 / (self.y[i][j, :].T @ self.s[i][j, :])\n                # aux0[i, j] should be a scalar\n                self.aux0[i, j] = self.rho[i, j] * (self.s[i][j, :].T @ self.q[j, :])\n                self.q[j, :] -= self.aux0[i, j] * self.y[i][j, :]\n\n        H_init = self.init_hessian_approx(num_iter)  # Previous y is y[-2], previous s is s[-1]\n\n        for j in range(self.problem.T):\n            self.r[j] = H_init[j][:, :] @ self.q[j, :]\n\n        for i in range(0, min(self.memory_length, num_iter), 1):\n            for j in range(self.problem.T):\n                self.aux1[j] = self.rho[i, j] * self.y[i][j, :].T @ self.r[j][:]  # aux1 should be a scalar\n                self.r[j] += (self.aux0[i, j] - self.aux1[j]) * self.s[i][j, :]\n\n        self.direction = -self.r\n    def backwardPass(self, num_iter):\n\n        self.dJdx[-1, :] = self.problem.terminalData.Lx\n        for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):\n            self.dJdu[t, :] = data.Lu + data.Fu.T @ self.dJdx[t + 1, :]\n            self.dJdx[t, :] = data.Lx + data.Fx.T @ self.dJdx[t + 1, :]\n        if num_iter - 1 < self.memory_length and num_iter != 0:\n            self.y.append(self.dJdu - self.dJdu_p)  # y keeps track of the most recent m steps\n        else:\n            self.y.append(self.dJdu - self.dJdu_p)\n            self.y.pop(0)\n\n\n    def init_hessian_approx(self, num_iter):\n        H_init = self.H0.copy()\n\n        return H_init\n        if num_iter == 0:\n            return H_init\n\n        else:\n            for t in range(self.problem.T):\n                num = self.s[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar\n                den = self.y[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar\n                # print('den:', den)\n                # print('num:', num)\n                H_init[t][:, :] = (num / den) * self.H0[t][:, :].copy()\n            return H_init\n\n    def calcCurvature(self):\n        curvature = 0.\n        # For Wolfe condition (curvature condition)\n        self.dJdx_try[-1, :] = self.problem.terminalData.Lx\n        for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):\n            self.dJdu_try[t, :] = data.Lu + data.Fu.T @ self.dJdx_try[t + 1, :]\n            self.dJdx_try[t, :] = data.Lx + data.Fx.T @ self.dJdx_try[t + 1, :]\n            curvature += self.dJdu_try[t, :].T @ self.direction[t, :]\n\n        return curvature\n\n    def calcCurvature_abs(self):\n        curvature_abs = 0.\n        # For Wolfe condition (curvature condition)\n        self.dJdx_try[-1, :] = self.problem.terminalData.Lx\n        for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):\n            self.dJdu_try[t, :] = data.Lu + data.Fu.T @ self.dJdx_try[t + 1, :]\n            self.dJdx_try[t, :] = data.Lx + data.Fx.T @ self.dJdx_try[t + 1, :]\n            curvature_abs += abs(self.dJdu_try[t, :].T @ self.direction[t, :])\n            print(f'in {t}th step: grad = {self.dJdu_try[t, :].T}, direction = {self.direction[t, :]}, gradTdirection= {self.dJdu[t, :].T @ self.direction[t, :]}')\n\n        return curvature_abs\n\n    def forwardPass(self, alphas):\n        cost_try = 0.\n        us = np.array(self.us)\n        us_try = us + alphas * self.direction\n        self.us_try = list(us_try)\n        self.lb = 0.\n        self.ub = 0.\n        self.threshold = 0.\n        self.curr_grad = 0.\n\n        for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):\n            model.calc(data, self.xs_try[t], self.us_try[t])\n            model.calcDiff(data, self.xs_try[t], self.us_try[t])\n            self.xs_try[t + 1] = data.xnext\n            cost_try += data.cost\n\n            # For Wolfe condition (sufficient decrease)\n            self.threshold -= (self.c1 * self.dJdu[t, :].T @ (alphas * self.direction[t, :]))\n\n        self.problem.terminalModel.calc(self.problem.terminalData, self.xs_try[-1])\n\n        cost_try += self.problem.terminalData.cost\n\n        return cost_try\n\n    def tryStep(self, alphas):\n        self.curvature_curr = 0.\n        self.curvature_prev = 0.\n        self.curvature_prev = self.calcCurvature_abs()\n        print('step:', alphas * self.direction)\n        self.cost_try = self.forwardPass(alphas)\n        self.problem.calc(self.xs_try, self.us_try)\n        self.problem.calcDiff(self.xs_try, self.us_try)\n        self.curvature_curr = self.calcCurvature_abs()\n        print('curvature_prev:', self.curvature_prev)\n        print('curvature_curr:', self.curvature_curr)\n\n\n\n        return self.cost - self.cost_try\n\n    def solve(self, init_xs=None, init_us=None, maxIter=10000, isFeasible=True):\n        # ___________________ Initialize ___________________#\n        if init_xs is None:\n            init_xs = [np.zeros(m.state.nx) for m in self.models()]\n        if init_us is None:\n            init_us = [np.zeros(m.nu) for m in self.problem.runningModels]\n\n        init_xs[0][:] = self.problem.x0.copy()  # Initial condition guess must be x0\n        self.xs_try[0][:] = self.problem.x0.copy()\n\n        self.setCandidate(init_xs, init_us, False)\n        # compute the gaps\n\n        self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function\n\n        print(\"initial cost is %s\" % self.cost)\n\n        for i in range(maxIter):\n            recalc = True  # this will recalculate derivatives in computeDirection\n            while True:  # backward pass\n                try:\n                    self.computeDirection(i, recalc=True)\n\n                except:\n                    print('In', i, 'th iteration.')\n                    raise BaseException(\"Backward Pass Failed\")\n                break\n\n            alphas = 1\n\n            while True:  # forward pass with line search\n\n                try:\n                    print(f'######################## Going into tryStep @ iteration {i} ##########################')\n                    print('alpha:', alphas)\n                    dV = self.tryStep(alphas)\n                except:\n                    # repeat starting from a smaller alpha\n                    print(\"Try Step Failed for alpha = %s\" % alphas)\n                    raise BaseException(\"Forward Pass Failed\")\n                    continue\n\n                print('dV:', dV)\n                curvature_cond_satisfied = self.curvature_curr <= self.curvature_prev\n\n                if dV >= max(self.threshold, 0) and curvature_cond_satisfied:\n                    print(f'in {i}th iteration:')\n                    print(\"step accepted for alpha = %s \\n new cost is %s\" % (alphas, self.cost_try))\n                    if i < self.memory_length:  # keep track of the most recent m steps\n                        self.s.append(alphas * self.direction)\n                    else:\n                        self.s.append(alphas * self.direction)\n                        self.s.pop(0)\n\n                    self.setCandidate(self.xs_try, self.us_try, isFeasible)\n                    self.cost = self.cost_try\n                    self.alphas_p = alphas\n                    if dV < 1.e-12:\n                        self.n_little_improvement += 1\n                        print(\"little improvements\")\n\n                    break\n\n                update_mask = .5\n\n                self.calc()  # recalc\n\n                alphas *= update_mask\n                # print('alphas after update:', alphas)\n                print('step length failed.')\n\n\n                if alphas <= self.alpha_threshold:\n                    print(\"No decrease found\")\n                    return False\n\n            self.stoppingCriteria()\n\n            if self.n_little_improvement >= 1 or self.stop < self.th_stop:\n                print('Converged')\n                return True\n\n        return False\n\n    def stoppingCriteria(self):\n        self.stop = 0\n        T = self.problem.T\n        for t in range(T):\n            self.stop += linalg.norm(self.dJdu[t])\n\n    def allocateData(self):\n\n        self.xs_try = [np.zeros(m.state.nx) for m in self.models()]\n        self.xs_try[0][:] = self.problem.x0.copy()\n        self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]\n        self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.dJdu_try = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.dJdu_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.q = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])\n        self.dJdx_try = np.array([np.zeros(m.state.ndx) for m in self.models()])\n        self.alpha_p = 0\n        self.direction = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.direction_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.y = []\n        self.s = []\n        self.H0 = [np.eye(m.nu) for m in self.problem.runningModels]\n        self.r = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.rho = np.zeros([self.memory_length, self.problem.T])\n        self.aux0 = np.zeros([self.memory_length, self.problem.T])\n        self.aux1 = np.zeros([self.problem.T])\n        self.curvature = np.zeros([self.problem.T])\n        self.curvature_curr = 0.\n        self.curvature_prev = 0.\n        self.alphas = np.ones([self.problem.T, 1])\n\n    def numDiff_grad(self, epsilon=1e-10):\n        # initialize states and controls\n        init_xs = [np.zeros(m.state.nx) for m in self.models()]\n        init_us = [np.zeros(m.nu) for m in self.problem.runningModels]\n        init_xs[0][:] = self.problem.x0.copy()  # Initial condition guess must be x0\n        X = self.problem.rollout(init_us)\n        print('X0:', X[0])\n        self.setCandidate(X, init_us, True)\n        # initialize completed\n        horizon = len(self.us)\n        print(f'horizon: {horizon}')\n        cost_grad = np.zeros(horizon)\n        self.calc()\n        cost_minus = self.calc()\n        for i in range(horizon):\n            U_plus = self.us.copy()\n            U = self.us.copy()\n            U_plus[i] += epsilon\n            # Compute the cost at U_plus and U_minus\n            X_plus = self.problem.rollout(U_plus)\n            print('X_plus:', X_plus[i])\n            self.problem.calc(X_plus, U_plus)  # Define cost_function accordingly\n            cost_plus = self.problem.calcDiff(X_plus, U_plus)\n            self.calc()\n\n            # Compute the gradient for the current element of U\n            cost_grad[i] = (cost_plus - cost_minus) / epsilon\n\n        print('numDiff_grad:', cost_grad)\n\n        return cost_grad\n\n\n\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/solverLBFGS.py b/solverLBFGS.py
+--- a/solverLBFGS.py	(revision 76383f1462f9af179688f854f4a01853b2f7f564)
++++ b/solverLBFGS.py	(date 1688680986210)
+@@ -38,15 +38,14 @@
+         self.n_little_improvement = 0
+         self.c1 = 1e-4
+         self.c2 = 1.
+-        #self.c = 1e-4
+         self.past_grad = 0.
+         self.curr_grad = 0.
+         self.change = 0.
+         self.change_p = 0.
+         self.lb = 0.
+         self.ub = 0.
+-        self.memory_length = 1000
+-        self.alpha_threshold = 1e-10
++        self.memory_length = 20
++        self.alpha_threshold = 1e-8
+         self.allocateData()
+ 
+     def models(self):
+@@ -77,10 +76,13 @@
+             for j in range(self.problem.T):
+                 # rho should be a scalar
+                 self.rho[i, j] = 1 / (self.y[i][j, :].T @ self.s[i][j, :])
++                print(f'y{i, j}, s{i, j}: {self.y[i][j, :].T, self.s[i][j, :]}')
++                print(f'rho{i, j}: {self.rho[i, j]}')
+                 # aux0[i, j] should be a scalar
+                 self.aux0[i, j] = self.rho[i, j] * (self.s[i][j, :].T @ self.q[j, :])
+                 self.q[j, :] -= self.aux0[i, j] * self.y[i][j, :]
+ 
++
+         H_init = self.init_hessian_approx(num_iter)  # Previous y is y[-2], previous s is s[-1]
+ 
+         for j in range(self.problem.T):
+@@ -109,17 +111,17 @@
+         H_init = self.H0.copy()
+ 
+         return H_init
+-        if num_iter == 0:
+-            return H_init
+-
+-        else:
+-            for t in range(self.problem.T):
+-                num = self.s[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar
+-                den = self.y[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar
+-                # print('den:', den)
+-                # print('num:', num)
+-                H_init[t][:, :] = (num / den) * self.H0[t][:, :].copy()
+-            return H_init
++        # if num_iter == 0:
++        #     return H_init
++        #
++        # else:
++        #     for t in range(self.problem.T):
++        #         num = self.s[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar
++        #         den = self.y[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar
++        #         # print('den:', den)
++        #         # print('num:', num)
++        #         H_init[t][:, :] = (num / den) * self.H0[t][:, :].copy()
++        #     return H_init
+ 
+     def calcCurvature(self):
+         curvature = 0.
+@@ -129,6 +131,7 @@
+             self.dJdu_try[t, :] = data.Lu + data.Fu.T @ self.dJdx_try[t + 1, :]
+             self.dJdx_try[t, :] = data.Lx + data.Fx.T @ self.dJdx_try[t + 1, :]
+             curvature += self.dJdu_try[t, :].T @ self.direction[t, :]
++            print(f'in {t}th step:\ngrad = {self.dJdu_try[t, :].T}, direction = {self.direction[t, :]}\ngradTdirection= {self.dJdu[t, :].T @ self.direction[t, :]}\n')
+ 
+         return curvature
+ 
+@@ -140,7 +143,7 @@
+             self.dJdu_try[t, :] = data.Lu + data.Fu.T @ self.dJdx_try[t + 1, :]
+             self.dJdx_try[t, :] = data.Lx + data.Fx.T @ self.dJdx_try[t + 1, :]
+             curvature_abs += abs(self.dJdu_try[t, :].T @ self.direction[t, :])
+-            print(f'in {t}th step: grad = {self.dJdu_try[t, :].T}, direction = {self.direction[t, :]}, gradTdirection= {self.dJdu[t, :].T @ self.direction[t, :]}')
++            print(f'in {t}th step:\ngrad = {self.dJdu_try[t, :].T}, direction = {self.direction[t, :]}\ngradTdirection= {self.dJdu[t, :].T @ self.direction[t, :]}\n')
+ 
+         return curvature_abs
+ 
+@@ -156,7 +159,7 @@
+ 
+         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
+             model.calc(data, self.xs_try[t], self.us_try[t])
+-            model.calcDiff(data, self.xs_try[t], self.us_try[t])
++            #model.calcDiff(data, self.xs_try[t], self.us_try[t])
+             self.xs_try[t + 1] = data.xnext
+             cost_try += data.cost
+ 
+@@ -172,12 +175,12 @@
+     def tryStep(self, alphas):
+         self.curvature_curr = 0.
+         self.curvature_prev = 0.
+-        self.curvature_prev = self.calcCurvature_abs()
++        self.curvature_prev = self.calcCurvature()
+         print('step:', alphas * self.direction)
+         self.cost_try = self.forwardPass(alphas)
+         self.problem.calc(self.xs_try, self.us_try)
+         self.problem.calcDiff(self.xs_try, self.us_try)
+-        self.curvature_curr = self.calcCurvature_abs()
++        self.curvature_curr = self.calcCurvature()
+         print('curvature_prev:', self.curvature_prev)
+         print('curvature_curr:', self.curvature_curr)
+ 
+@@ -185,7 +188,7 @@
+ 
+         return self.cost - self.cost_try
+ 
+-    def solve(self, init_xs=None, init_us=None, maxIter=10000, isFeasible=True):
++    def solve(self, init_xs=None, init_us=None, maxIter=1000, isFeasible=True):
+         # ___________________ Initialize ___________________#
+         if init_xs is None:
+             init_xs = [np.zeros(m.state.nx) for m in self.models()]
+@@ -223,12 +226,13 @@
+                     dV = self.tryStep(alphas)
+                 except:
+                     # repeat starting from a smaller alpha
++                    alphas *= .5
+                     print("Try Step Failed for alpha = %s" % alphas)
+-                    raise BaseException("Forward Pass Failed")
+                     continue
+ 
+                 print('dV:', dV)
+-                curvature_cond_satisfied = self.curvature_curr <= self.curvature_prev
++                curvature_cond_satisfied = self.curvature_curr >= self.curvature_prev
++                curvature_cond_satisfied_abs = self.curvature_curr <= self.curvature_prev
+ 
+                 if dV >= max(self.threshold, 0) and curvature_cond_satisfied:
+                     print(f'in {i}th iteration:')
+@@ -241,31 +245,28 @@
+ 
+                     self.setCandidate(self.xs_try, self.us_try, isFeasible)
+                     self.cost = self.cost_try
+-                    self.alphas_p = alphas
+                     if dV < 1.e-12:
+                         self.n_little_improvement += 1
+                         print("little improvements")
+ 
+                     break
+ 
++                if alphas <= self.alpha_threshold:
++                    print("No decrease found")
++                    return False
++
+                 update_mask = .5
+ 
+                 self.calc()  # recalc
+-
+                 alphas *= update_mask
+-                # print('alphas after update:', alphas)
++
+                 print('step length failed.')
+ 
+-
+-                if alphas <= self.alpha_threshold:
+-                    print("No decrease found")
+-                    return False
+-
+             self.stoppingCriteria()
+ 
+             if self.n_little_improvement >= 1 or self.stop < self.th_stop:
+-                print('Converged')
+-                return True
++                 print('Converged')
++                 return True
+ 
+         return False
+ 
+Index: solverBGFS.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import numpy as np\nimport scipy.linalg as scl\nfrom crocoddyl import SolverAbstract\nfrom numpy import linalg\n\nLINE_WIDTH = 100\n\nVERBOSE = False\n\n\ndef rev_enumerate(l):\n    return reversed(list(enumerate(l)))\n\n\ndef raiseIfNan(A, error=None):\n    if error is None:\n        error = scl.LinAlgError(\"NaN in array\")\n    if np.any(np.isnan(A)) or np.any(np.isinf(A)) or np.any(abs(np.asarray(A)) > 1e30):\n        raise error\n\n\nclass SolverBGFS(SolverAbstract):\n    def __init__(self, shootingProblem):\n        SolverAbstract.__init__(self, shootingProblem)\n        self.cost = 0.\n        self.cost_try = 0.\n        self.threshold = 1e-12\n        self.stop = 0.\n        self.x_reg = 0\n        self.u_reg = 0\n        self.regFactor = 10\n        self.regMax = 1e9\n        self.regMin = 1e-9\n        self.th_step = .5\n        self.th_stop = 1.e-9\n        self.n_little_improvement = 0\n        self.c1 = 1e-4\n        self.c2 = .9\n        self.c = 1e-4\n        self.past_grad = 0.\n        self.curr_grad = 0.\n        self.change = 0.\n        self.change_p = 0.\n        self.lb = 0.\n        self.ub = 0.\n        self.memory_length = 30\n        self.allocateData()\n\n    def models(self):\n        mod = [m for m in self.problem.runningModels]\n        mod += [self.problem.terminalModel]\n        return mod\n\n    def calc(self):\n        # compute cost and derivatives at deterministic nonlinear trajectory\n        self.problem.calc(self.xs, self.us)\n        cost = self.problem.calcDiff(self.xs, self.us)\n        return cost\n\n    def computeDirection(self, num_iter, recalc=True):\n\n        self.direction_p = self.direction.copy()\n        self.dJdu_p = self.dJdu.copy()\n        # if recalc:\n        #    if VERBOSE: print(\"Going into Calc from compute direction\")\n\n        self.calc()\n        if VERBOSE: print(\"Going into Backward Pass from compute direction\")\n        self.backwardPass(num_iter)  # get new dJdu\n        self.q = self.dJdu.copy()\n\n        for i in range(min(self.memory_length, num_iter)-1, -1, -1):\n            for j in range(self.problem.T):\n                # print('self.y[i][j][:].T @ self.s[i][j][:]:', self.y[i][j, :].T @ self.s[i][j, :])\n\n                # rho should be a scalar\n                self.rho[i, j] = 1 / (self.y[i][j, :].T @ self.s[i][j, :])\n\n                # print('rho:', self.rho)\n                # print('self.s[i][j][:].T @ self.q[j][:]:', self.s[i][j, :].T @ self.q[j][:])\n\n                # aux0[i, j] should be a scalar\n                self.aux0[i, j] = self.rho[i, j] * (self.s[i][j, :].T @ self.q[j, :])\n\n                # print('aux0:', self.aux0)\n                # print('aux0[i, j]', self.aux0[i, j])\n                # print('q:', self.q)\n\n                self.q[j, :] -= self.aux0[i, j] * self.y[i][j, :]\n                # print('q:', self.q)\n\n        H_init = self.init_hessian_approx(num_iter)  # Previous y is y[-2], previous s is s[-1]\n\n        for j in range(self.problem.T):\n            self.r[j] = H_init[j][:, :] @ self.q[j, :]\n\n        for i in range(0, min(self.memory_length, num_iter), 1):\n            for j in range(self.problem.T):\n                self.aux1[j] = self.rho[i, j] * self.y[i][j, :].T @ self.r[j][:]  # aux1 should be a scalar\n                self.r[j] += (self.aux0[i, j] - self.aux1[j]) * self.s[i][j, :]\n\n        self.direction = -self.r\n        # print('direction:', self.direction)\n\n    def backwardPass(self, num_iter):\n        self.dJdx[-1, :] = self.problem.terminalData.Lx\n        for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):\n            self.dJdu[t, :] = data.Lu + self.dJdx[t + 1, :] @ data.Fu\n            self.dJdx[t, :] = data.Lx + self.dJdx[t + 1, :] @ data.Fx\n\n        if num_iter - 1 < self.memory_length and num_iter != 0:\n            self.y.append(self.dJdu - self.dJdu_p)  # y keeps track of the most recent m steps\n        else:\n            self.y.append(self.dJdu - self.dJdu_p)\n            self.y.pop(0)\n\n    def init_hessian_approx(self, num_iter):\n        H_init = self.H0[:]\n\n        if True:  # num_iter <= 1:\n            return H_init\n\n        else:\n            for t in range(self.problem.T):\n                num = self.s[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar\n                den = self.y[-1][t, :].T @ self.y[-1][t, :]  # should be a scalar\n                # print('den:', den)\n                # print('num:', num)\n                H_init[t][:, :] = (num / den) * self.H0[t][:, :]\n            return H_init\n\n    def forwardPass(self, alpha):\n        cost_try = 0.\n        us = np.array(self.us)\n        us_try = us + alpha * self.direction\n        self.us_try = list(us_try)\n        self.lb = 0.\n        self.ub = 0.\n        self.threshold = 0.\n        self.curr_grad = 0.\n        # need to make sure self.xs_try[0] = x0\n        for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):\n            model.calc(data, self.xs_try[t], self.us_try[t])\n            self.xs_try[t + 1] = data.xnext\n            cost_try += data.cost\n            self.lb += -self.c * alpha * self.dJdu[t, :].T @ self.direction[t, :]\n            self.ub += (self.c - 1) * alpha * self.dJdu[t, :].T @ self.direction[t, :]\n\n            # For Wolfe condition (sufficient decrease)\n            self.threshold += -self.c1 * alpha * self.dJdu[t, :].T @ self.direction[t, :]\n\n        self.problem.terminalModel.calc(self.problem.terminalData, self.xs_try[-1])\n\n        cost_try += self.problem.terminalData.cost\n\n        return cost_try\n\n    def init_alpha(self):\n        return 1  # self.alpha_p * (self.change_p / self.change)\n\n    def calcCurvature(self):\n        # For Wolfe condition (curvature condition)\n        curvature = 0.\n        self.dJdx_try[-1, :] = self.problem.terminalData.Lx\n        for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):\n            self.dJdu[t, :] = data.Lu + self.dJdx[t + 1, :] @ data.Fu\n            self.dJdx[t, :] = data.Lx + self.dJdx[t + 1, :] @ data.Fx\n            curvature += self.dJdu[t, :].T @ self.direction[t, :]\n\n        return curvature\n\n    def tryStep(self, alpha):\n        self.curvature_curr = 0.\n        self.curvature_prev = 0.\n\n        # self.curvature_prev = self.c2 * self.calcCurvature()\n        self.cost_try = self.forwardPass(alpha)\n        # self.problem.calc(self.xs_try, self.us_try)\n        # self.problem.calcDiff(self.xs_try, self.us_try)\n        # self.curvature_curr = self.calcCurvature()\n\n        return self.cost - self.cost_try\n\n    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=True):\n        # ___________________ Initialize ___________________#\n        if init_xs is None:\n            init_xs = [np.zeros(m.state.nx) for m in self.models()]\n        if init_us is None:\n            init_us = [np.zeros(m.nu) for m in self.problem.runningModels]\n\n        init_xs[0][:] = self.problem.x0.copy()  # Initial condition guess must be x0\n        self.xs_try[0][:] = self.problem.x0.copy()\n\n        self.setCandidate(init_xs, init_us, False)\n        # compute the gaps\n\n        self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function\n\n        print(\"initial cost is %s\" % self.cost)\n\n        for i in range(maxIter):\n            recalc = True  # this will recalculate derivatives in computeDirection\n            while True:  # backward pass\n                try:\n                    self.computeDirection(i, recalc=True)\n\n                except:\n                    print('In', i, 'th iteration.')\n                    raise BaseException(\"Backward Pass Failed\")\n                break\n\n            alpha = 1\n\n            while True:  # forward pass with line search\n\n                try:\n                    dV = self.tryStep(alpha)\n\n                except:\n                    # repeat starting from a smaller alpha\n                    print(\"Try Step Failed for alpha = %s\" % alpha)\n                    raise BaseException(\"Forward Pass Failed\")\n                    continue\n                # print('dV:', dV)\n                # print('threshold:', self.threshold)\n                # print('curvature_prev:', self.curvature_prev)\n                # print('curvature_curr:', self.curvature_curr)\n\n                if dV >= max(self.threshold, 0):\n                    # print(f'in {i}th iteration:')\n                    # print(\"step accepted for alpha = %s \\n new cost is %s\" % (alpha, self.cost_try))\n                    if i < self.memory_length:  # keep track of the most recent m steps\n                        self.s.append(alpha * self.direction)\n                    else:\n                        self.s.append(alpha * self.direction)\n                        self.s.pop(0)\n\n                    self.setCandidate(self.xs_try, self.us_try, isFeasible)\n                    self.cost = self.cost_try\n                    if dV < 1.e-12:\n                        self.n_little_improvement += 1\n                        print(\"little improvements\")\n\n                    break\n\n                else:\n                    self.calc()\n\n                if alpha <= 1e-10:\n                    print(\"No decrease found\")\n                    return False\n\n                alpha *= .5\n                # print('step length failed at', i, 'iteration.')\n            self.stoppingCriteria()\n\n            if self.n_little_improvement >= 1 or self.stop < self.th_stop:\n                print('Converged')\n                return True\n\n        return False\n\n    def stoppingCriteria(self):\n        self.stop = 0\n        T = self.problem.T\n        for t in range(T):\n            self.stop += linalg.norm(self.dJdu[t])\n\n    def allocateData(self):\n\n        self.xs_try = [np.zeros(m.state.nx) for m in self.models()]\n        self.xs_try[0][:] = self.problem.x0.copy()\n        self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]\n        self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.dJdu_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.q = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])\n        self.alpha_p = 0\n        self.direction = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.direction_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        # self.y = [np.array([np.zeros(m.nu) for m in self.problem.runningModels]) for n in range(self.memory_length)]\n        # self.s = [np.array([np.zeros(m.nu) for m in self.problem.runningModels]) for n in range(self.memory_length)]\n        self.y = []\n        self.s = []\n        self.H0 = [np.eye(m.nu) for m in self.problem.runningModels]\n        self.r = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])\n        self.rho = np.zeros([self.memory_length, self.problem.T])\n        self.aux0 = np.zeros([self.memory_length, self.problem.T])\n        self.aux1 = np.zeros([self.problem.T])\n        self.curvature_curr = 0.\n        self.curvature_prev = 0.\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/solverBGFS.py b/solverBGFS.py
+--- a/solverBGFS.py	(revision 76383f1462f9af179688f854f4a01853b2f7f564)
++++ b/solverBGFS.py	(date 1688682093148)
+@@ -43,7 +43,7 @@
+         self.change_p = 0.
+         self.lb = 0.
+         self.ub = 0.
+-        self.memory_length = 30
++        self.memory_length = 100
+         self.allocateData()
+ 
+     def models(self):
+Index: unitTest.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>import crocoddyl\nimport numpy as np\nfrom solverILQR import SolverILqr\nfrom solverGD import SolverGD\nfrom solverADAM import SolverADAM\nfrom solverLBFGS import SolverLBGFS\nfrom solverBGFS import SolverBGFS\nimport psutil\nimport time\nimport threading\nfrom quadrotor import quadrotor_problem\nfrom arm_manipulation import arm_manipulation_problem\n\nclass Tester:\n    def __init__(self, NX=6, NU=1, T=10, maxIter=100000):\n        self.NX = NX\n        self.NU = NU\n        self.T = T\n        self.maxIter = maxIter\n\n        self.x0 = np.ones(NX) * 10.\n        self.runningModel = crocoddyl.ActionModelLQR(NX, NU)\n        self.terminalModel = crocoddyl.ActionModelLQR(NX, NU)\n        self.problem = crocoddyl.ShootingProblem(self.x0, [self.runningModel] * T, self.terminalModel)\n\n        #self.problem = arm_manipulation_problem(self.T)\n\n        self.init_us = [np.zeros(m.nu) for m in self.problem.runningModels]\n        self.init_xs = self.problem.rollout(self.init_us)\n        self.iLQR = SolverILqr(self.problem)\n        self.DDP = crocoddyl.SolverDDP(self.problem)\n        self.GD = SolverGD(self.problem)\n        self.ADAM = SolverADAM(self.problem)\n        self.LBFGS = SolverLBGFS(self.problem)\n        self.BGFS = SolverBGFS(self.problem)\n\n\n    def testCrocoddylDDP(self):\n        start_time = time.time()\n        self.DDP.solve(self.init_xs, self.init_us, self.maxIter, True, 0)\n        end_time = time.time()\n        # time.sleep(5)\n        return end_time - start_time\n\n    def testILQR(self):\n        start_time = time.time()\n        self.iLQR.solve(self.init_xs, self.init_us, self.maxIter)\n        end_time = time.time()\n        #time.sleep(5)\n        return end_time - start_time\n\n    def testGD(self):\n        start_time = time.time()\n        self.GD.solve(self.init_xs, self.init_us, self.maxIter)\n        end_time = time.time()\n        # time.sleep(5)\n        return end_time - start_time\n\n    def testADAM(self):\n        start_time = time.time()\n        self.ADAM.solve(self.init_xs, self.init_us, self.maxIter)\n        end_time = time.time()\n        # time.sleep(5)\n        return end_time - start_time\n\n    def testLBFGS(self):\n        start_time = time.time()\n        self.LBFGS.solve(self.init_xs, self.init_us, self.maxIter)\n        end_time = time.time()\n        # time.sleep(5)\n        return end_time - start_time\n\n    def testBFGS(self):\n        start_time = time.time()\n        self.BGFS.solve(self.init_xs, self.init_us, self.maxIter)\n        end_time = time.time()\n        # time.sleep(5)\n        return end_time - start_time\n\n\n\ndef monitor_threads(stop_event):\n    current_pid = psutil.Process().pid\n    while not stop_event.is_set():\n        try:\n            process = psutil.Process(current_pid)\n            num_threads = process.num_threads()\n            print(f'Number of threads: {num_threads}')\n        except psutil.NoSuchProcess:\n            print(\"Process has ended\")\n            break\n        time.sleep(1)\n\ndef testGrad(Solver):\n    Solver.numDiff_grad()\n    print('xs:', Solver.xs)\n    print('us:', Solver.us)\n    #Solver.calc() # reclac\n    #print('grad:', Solver.dJdu)\n    Solver.backwardPass(1)\n    print('xs:', Solver.xs)\n    print('us:', Solver.us)\n    print('analyticDIff_grad:', Solver.dJdu)\n\nif __name__ == '__main__':\n\n    tester = Tester()\n\n    print('DDP testing:')\n    stop_event_1 = threading.Event()\n    monitor_thread_1 = threading.Thread(target=monitor_threads, args=(stop_event_1,))\n    monitor_thread_1.start()\n    running_time1 = tester.testCrocoddylDDP()\n    stop_event_1.set()\n    monitor_thread_1.join()\n\n\n    print('LBFGS testing:')\n    stop_event_2 = threading.Event()\n    monitor_thread_2 = threading.Thread(target=monitor_threads, args=(stop_event_2,))\n    monitor_thread_2.start()\n    running_time2 = tester.testLBFGS()\n    stop_event_2.set()\n    monitor_thread_2.join()\n\n\n    print('optimal control form DDP solver:', tester.DDP.us[0][:], 'cost=', tester.DDP.cost)\n    print('optimal control from LBGFS solver:', tester.LBFGS.us[0][:], 'cost=', tester.LBFGS.cost)\n    #print('optimal control form BGFS solver:', tester.BGFS.us[0][:], 'cost=', tester.BGFS.cost)\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/unitTest.py b/unitTest.py
+--- a/unitTest.py	(revision 76383f1462f9af179688f854f4a01853b2f7f564)
++++ b/unitTest.py	(date 1688681940655)
+@@ -11,8 +11,9 @@
+ from quadrotor import quadrotor_problem
+ from arm_manipulation import arm_manipulation_problem
+ 
++#np.seterr(all = 'raise')
+ class Tester:
+-    def __init__(self, NX=6, NU=1, T=10, maxIter=100000):
++    def __init__(self, NX=6, NU=1, T=5, maxIter=100000):
+         self.NX = NX
+         self.NU = NU
+         self.T = T

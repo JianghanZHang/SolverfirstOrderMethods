@@ -1,4 +1,4 @@
-#https://towardsdatascience.com/complete-guide-to-adam-optimization-1e5f29532c3d
+import pdb
 
 import numpy as np
 from numpy import linalg
@@ -15,15 +15,13 @@ VERBOSE = False
 def rev_enumerate(l):
     return reversed(list(enumerate(l)))
 
-
 def raiseIfNan(A, error=None):
     if error is None:
         error = scl.LinAlgError("NaN in array")
     if np.any(np.isnan(A)) or np.any(np.isinf(A)) or np.any(abs(np.asarray(A)) > 1e30):
         raise error
 
-
-class SolverADAM(SolverAbstract):
+class SolverNAG(SolverAbstract):
     def __init__(self, shootingProblem):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
@@ -38,15 +36,7 @@ class SolverADAM(SolverAbstract):
         self.th_step = .5
         self.th_stop = 1.e-5
         self.n_little_improvement = 0
-        self.c1 = 1e-4
-        self.c2 = .9
-        self.c = 1e-4
-        self.past_grad = 0.
-        self.curr_grad = 0.
-        self.change = 0.
-        self.change_p = 0.
-        self.lb = 0.
-        self.ub = 0.
+
         self.allocateData()
 
     def models(self):
@@ -70,6 +60,7 @@ class SolverADAM(SolverAbstract):
         self.backwardPass()
 
     def backwardPass(self):
+
         self.dJdx[-1, :] = self.problem.terminalData.Lx
         for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             self.dJdu[t, :] = data.Lu + self.dJdx[t+1, :] @ data.Fu
@@ -79,18 +70,17 @@ class SolverADAM(SolverAbstract):
         self.kkt = linalg.norm(self.Qu, 2)
         self.KKTs.append(self.kkt)
 
-
     def forwardPass(self, alpha, i):
+       # print(f'alpha: {alpha}')
         cost_try = 0.
-        self.m = self.Beta1 * self.m + (1 - self.Beta1) * self.dJdu
-        self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu**2)
-        m_corrected = self.m / (1 - self.Beta1 ** (i + 1))
-        v_corrected = self.v / (1 - self.Beta2 ** (i + 1))
-        update = m_corrected / (np.sqrt(v_corrected) + self.eps)
         us = np.array(self.us)
-        us_try = us - alpha * update
-        self.us_try = list(us_try)
+        us_p = np.array(self.us_p)
+        self.s_p = self.s
+        self.s = -alpha * self.dJdu
+        self.v = us - us_p
 
+        us_try = us + (1+self.mu) * self.s - self.mu * self.s_p + self.mu * self.v
+        self.us_try = list(us_try)
         # need to make sure self.xs_try[0] = x0
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             model.calc(data, self.xs_try[t], self.us_try[t])
@@ -105,6 +95,7 @@ class SolverADAM(SolverAbstract):
 
     def tryStep(self, alpha, i):
         self.cost_try = self.forwardPass(alpha, i)
+
         return self.cost - self.cost_try
 
     def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False, alpha=.01):
@@ -136,11 +127,9 @@ class SolverADAM(SolverAbstract):
 
                 except:
                     print('In', i, 'th iteration.')
-                    #pdb.set_trace()
                     raise BaseException("Backward Pass Failed")
                 break
-
-
+            if i == 0: self.us_p = self.us
             while True:  # forward pass with line search
                 try:
                     self.tryStep(alpha, i)
@@ -148,11 +137,12 @@ class SolverADAM(SolverAbstract):
                 except:
                     # repeat starting from a smaller alpha
                     print("Try Step Failed for alpha = %s" % alpha)
-                    raise BaseException("Backward Pass Failed")
+                    raise BaseException('Forward Pass failed')
                 break
 
             self.dV = self.cost - self.cost_try
-            self.setCandidate(self.xs_try, self.us_try, isFeasible)
+            self.us_p = self.us  # record previous us
+            self.setCandidate(self.xs_try, self.us_try, isFeasible)  # update us
             self.cost = self.cost_try
             self.costs.append(self.cost)
             self.alpha_p = alpha
@@ -177,14 +167,17 @@ class SolverADAM(SolverAbstract):
         self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]
         self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
-        self.m = np.zeros_like(self.dJdu)
-        self.v = np.zeros_like(self.dJdu)
-        self.Beta1 = .9
-        self.Beta2 = .999
-        self.eps = 1e-8
+        self.alpha_p = 0
+        self.dJdu_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.numIter = 0
+        self.costs = []
         self.kkt = 0.
         self.KKTs = []
-        self.costs = []
-        self.numIter = 0
-
+        self.mu = .8
+        self.y = 0.
+        self.y_p = 0.
+        self.us_p = [np.zeros(m.nu) for m in self.problem.runningModels]
+        self.s = 0.
+        self.s_p = 0.
+        self.v = 0.
 

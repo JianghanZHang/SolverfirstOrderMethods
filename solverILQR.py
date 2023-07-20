@@ -1,9 +1,12 @@
+import pdb
+
 import numpy as np
 from numpy import linalg
 
 import scipy.linalg as scl
 import crocoddyl
 from crocoddyl import SolverAbstract
+import time
 
 LINE_WIDTH = 100
 
@@ -35,7 +38,7 @@ class SolverILqr(SolverAbstract):
         self.regMax = 1e9
         self.regMin = 1e-9
         self.th_step = .5
-        self.th_stop = 1e-6
+        self.th_stop = 1e-5
         self.n_little_improvement = 0
         self.allocateData()
 
@@ -46,7 +49,6 @@ class SolverILqr(SolverAbstract):
 
     def calc(self):
         # compute cost and derivatives at deterministic nonlinear trajectory
-
         self.problem.calc(self.xs, self.us)
         cost = self.problem.calcDiff(self.xs, self.us)
         return cost
@@ -66,7 +68,6 @@ class SolverILqr(SolverAbstract):
             Vxx_p = self.Vxx[t + 1]
 
             Vx_pFx = Vx_p @ data.Fx
-
             Vx_pFu = Vx_p @ data.Fu
 
             FxTVxx_pFx = data.Fx.T @ Vxx_p @ data.Fx
@@ -82,7 +83,7 @@ class SolverILqr(SolverAbstract):
             L_Quu = scl.cho_factor(self.Quu[t], lower=True)
 
             self.K[t][:, :] = -scl.cho_solve(L_Quu, self.Qux[t])
-            # self.K[t][:, :] = -linalg.pinv(self.Quu[t]) @ self.Qux[t]
+            # K[t] = -inv(Quu[t]) @ Qux[t]
 
             self.k[t][:] = -scl.cho_solve(L_Quu, self.Qu[t])
 
@@ -91,8 +92,8 @@ class SolverILqr(SolverAbstract):
             self.Vxx[t][:, :] = self.Qxx[t] + self.Qux[t].T @ self.K[t]
 
         Qu = np.array(self.Qu)
-        self.kkt = np.max(abs(Qu))
-        self.KKTs.append(self.kkt+1e-12)
+        self.kkt = linalg.norm(Qu, 2)
+        self.KKTs.append(self.kkt)
 
 
     def forwardPass(self, alpha):
@@ -117,7 +118,9 @@ class SolverILqr(SolverAbstract):
 
         return self.cost - self.cost_try
 
-    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=True):
+    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False):
+
+        #print('ilqr solving!')
         # ___________________ Initialize ___________________#
         if init_xs is None:
             init_xs = [np.zeros(m.state.nx) for m in self.models()]
@@ -127,7 +130,10 @@ class SolverILqr(SolverAbstract):
         init_xs[0][:] = self.problem.x0.copy()  # Initial condition guess must be x0
         self.xs_try[0][:] = self.problem.x0.copy()
 
-        self.setCandidate(init_xs, init_us, False)
+        if not isFeasible:
+            init_xs = self.problem.rollout(init_us)
+
+        self.setCandidate(init_xs, init_us, True)
         # compute the gaps
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
@@ -135,8 +141,11 @@ class SolverILqr(SolverAbstract):
         self.costs.append(self.cost)
 
         # print("initial cost is %s" % self.cost)
+        self.numIter = 0
+        self.guess_accepted = []
 
         for i in range(maxIter):
+            start_time = time.time()
             recalc = True  # this will recalculate derivatives in computeDirection
             while True:  # backward pass
                 try:
@@ -168,6 +177,12 @@ class SolverILqr(SolverAbstract):
                     if dV < 1.e-12:
                         self.n_little_improvement += 1
                         print("little improvements")
+
+                    if a == self.alphas[0]:
+                        self.guess_accepted.append(True)
+                    else:
+                        self.guess_accepted.append(False)
+
                     break
 
                 if abs(a - self.alphas[-1]) < 1e-6:
@@ -178,7 +193,9 @@ class SolverILqr(SolverAbstract):
 
             self.numIter += 1
 
-           #if self.n_little_improvement >= 1 or self.kkt < self.th_stop:
+            end_time = time.time()
+            self.times.append(end_time - start_time)
+
 
         return False
 
@@ -209,3 +226,5 @@ class SolverILqr(SolverAbstract):
         self.K = [np.zeros([m.nu, m.state.ndx]) for m in self.problem.runningModels]
         self.k = [np.zeros([m.nu]) for m in self.problem.runningModels]
         self.numIter = 0
+        self.times = []
+        self.guess_accepted = []
