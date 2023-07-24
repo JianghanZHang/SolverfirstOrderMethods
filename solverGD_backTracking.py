@@ -1,9 +1,8 @@
-#https://towardsdatascience.com/complete-guide-to-adam-optimization-1e5f29532c3d
-import pdb
-
+""""
+This implementation used a trivial back tracking line search
+"""
 import numpy as np
 from numpy import linalg
-
 import scipy.linalg as scl
 import crocoddyl
 from crocoddyl import SolverAbstract
@@ -24,7 +23,7 @@ def raiseIfNan(A, error=None):
         raise error
 
 
-class SolverADAM(SolverAbstract):
+class SolverGD(SolverAbstract):
     def __init__(self, shootingProblem):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
@@ -57,7 +56,6 @@ class SolverADAM(SolverAbstract):
 
     def calc(self):
         # compute cost and derivatives at deterministic nonlinear trajectory
-
         self.problem.calc(self.xs, self.us)
         cost = self.problem.calcDiff(self.xs, self.us)
         return cost
@@ -73,33 +71,27 @@ class SolverADAM(SolverAbstract):
     def backwardPass(self):
         self.dJdx[-1, :] = self.problem.terminalData.Lx
         for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
-            self.dJdu[t, :] = data.Lu + self.dJdx[t+1, :] @ data.Fu
-            self.dJdx[t, :] = data.Lx + self.dJdx[t+1, :] @ data.Fx
+            self.dJdu[t, :] = data.Lu + self.dJdx[t + 1, :] @ data.Fu
+            self.dJdx[t, :] = data.Lx + self.dJdx[t + 1, :] @ data.Fx
 
         self.Qu = self.dJdu
         self.kkt = linalg.norm(self.Qu, 2)
         self.KKTs.append(self.kkt)
+        # pdb.set_trace()
 
-    def forwardPass(self, alpha, i):
+    def forwardPass(self, alpha):
         cost_try = 0.
-        self.m = self.Beta1 * self.m + (1 - self.Beta1) * (self.dJdu)
-        self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu**2)
-        if self.bias_correction:
-            m_corrected = self.m / (1 - self.Beta1 ** (i + 2))
-            v_corrected = self.v / (1 - self.Beta2 ** (i + 2))
-        else:
-            m_corrected = self.m
-            v_corrected = self.v
-        update = m_corrected / (np.sqrt(v_corrected) + self.eps)
         us = np.array(self.us)
-        us_try = us - alpha * update
+        self.direction = -self.dJdu
+        us_try = us + alpha * self.direction
         self.us_try = list(us_try)
-        #pdb.set_trace()
+        self.curvature_0 = 0.
         # need to make sure self.xs_try[0] = x0
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             model.calc(data, self.xs_try[t], self.us_try[t])
             self.xs_try[t + 1] = data.xnext
             cost_try += data.cost
+            self.curvature_0 += self.dJdu[t, :].T @ self.direction[t, :]
 
         self.problem.terminalModel.calc(self.problem.terminalData, self.xs_try[-1])
 
@@ -107,11 +99,13 @@ class SolverADAM(SolverAbstract):
 
         return cost_try
 
-    def tryStep(self, alpha, i):
-        self.cost_try = self.forwardPass(alpha, i)
+    def tryStep(self, alpha):
+        self.direction_p = self.direction
+        self.cost_try = self.forwardPass(alpha)
+
         return self.cost - self.cost_try
 
-    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False, alpha=None):
+    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False):
         # ___________________ Initialize ___________________#
         if init_xs is None:
             init_xs = [np.zeros(m.state.nx) for m in self.models()]
@@ -124,26 +118,16 @@ class SolverADAM(SolverAbstract):
         if not isFeasible:
             init_xs = self.problem.rollout(init_us)
 
-        if self.refresh:
-            self.refresh_()
-        else:
-            #pdb.set_trace()
-            m = list(self.m[1:]) + [self.m[-1]]
-            v = list(self.v[1:]) + [self.v[-1]]
-            self.m = np.array(m)
-            self.v = np.array(v)
-            self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-            self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
-
-        self.setCandidate(init_xs, init_us, True)
+        self.setCandidate(init_xs, init_us, False)
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
         self.costs.append(self.cost)
-
-        #print("initial cost is %s" % self.cost)
+        # print("initial cost is %s" % self.cost)
 
         for i in range(maxIter):
             self.numIter = i
+            self.guess = min(1.1 * self.alpha_p, 1)
+            self.alpha = self.guess
             recalc = True  # this will recalculate derivatives in computeDirection
             while True:  # backward pass
                 try:
@@ -151,32 +135,44 @@ class SolverADAM(SolverAbstract):
 
                 except:
                     print('In', i, 'th iteration.')
-                    #pdb.set_trace()
+                    # import pdb; pdb.set_trace()
                     raise BaseException("Backward Pass Failed")
                 break
-
-
-            while True:  # forward pass with line search
-                try:
-                    self.tryStep(alpha, i)
-
-                except:
-                    # repeat starting from a smaller alpha
-                    print("Try Step Failed for alpha = %s" % alpha)
-                    raise BaseException("Backward Pass Failed")
-                break
-
-            self.dV = self.cost - self.cost_try
-            self.setCandidate(self.xs_try, self.us_try, isFeasible)
-            self.cost = self.cost_try
-            self.costs.append(self.cost)
-            self.alpha_p = alpha
-
-            self.stoppingCriteria()
 
             if self.kkt < self.th_stop:
                 print('Converged')
                 return True
+
+            while True:  # doing line search
+                while True:  # forward pass
+                    try:
+                        self.tryStep(self.alpha)
+
+                    except:
+                        # repeat starting from a smaller alpha
+                        print("Try Step Failed for alpha = %s" % self.alpha)
+                    break
+
+                if self.cost_try <= self.cost + self.c1 * self.alpha * self.curvature_0:
+                    # line search succeed -> exit
+                    self.setCandidate(self.xs_try, self.us_try, True)
+                    self.cost = self.cost_try
+                    self.costs.append(self.cost)
+                    self.alpha_p = self.alpha
+                    break
+                else:
+                    self.alpha *= .5
+
+                if self.alpha < 2e-8:
+                    print(f'alpha={self.alpha}, line search failed')
+                    return False
+
+            if self.alpha == self.guess:
+                self.guess_accepted.append(True)
+            else:
+                self.guess_accepted.append(False)
+
+            self.stoppingCriteria()
 
         return False
 
@@ -185,11 +181,6 @@ class SolverADAM(SolverAbstract):
             self.n_little_improvement += 1
             if VERBOSE: print('Little improvement.')
 
-    def refresh_(self):
-        self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-        self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
-        self.m = np.zeros_like(self.dJdu)
-        self.v = np.zeros_like(self.dJdu)
     def allocateData(self):
 
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
@@ -197,18 +188,16 @@ class SolverADAM(SolverAbstract):
         self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]
         self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
-        self.m = np.zeros_like(self.dJdu)
-        self.v = np.zeros_like(self.dJdu)
-        self.Beta1 = .9
-        self.Beta2 = .999
-        self.eps = 1e-8
+        self.alpha_p = 0
+        self.dJdu_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.direction = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.direction_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.numIter = 0
+        self.costs = []
         self.kkt = 0.
         self.KKTs = []
-        self.costs = []
-        self.numIter = 0
-        self.decay1 = 1.
-        self.decay2 = 1.
-        self.bias_correction = True
-        self.refresh = False
-
+        self.alpha = 1.
+        self.curvature_0 = 0.
+        self.alpha_p = 1.
+        self.guess_accepted = []
 

@@ -24,7 +24,7 @@ def raiseIfNan(A, error=None):
         raise error
 
 
-class SolverADAM(SolverAbstract):
+class SolverADAN(SolverAbstract):
     def __init__(self, shootingProblem):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
@@ -57,7 +57,6 @@ class SolverADAM(SolverAbstract):
 
     def calc(self):
         # compute cost and derivatives at deterministic nonlinear trajectory
-
         self.problem.calc(self.xs, self.us)
         cost = self.problem.calcDiff(self.xs, self.us)
         return cost
@@ -71,6 +70,7 @@ class SolverADAM(SolverAbstract):
         self.backwardPass()
 
     def backwardPass(self):
+        self.dJdu_p = self.dJdu.copy()
         self.dJdx[-1, :] = self.problem.terminalData.Lx
         for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             self.dJdu[t, :] = data.Lu + self.dJdx[t+1, :] @ data.Fu
@@ -82,19 +82,23 @@ class SolverADAM(SolverAbstract):
 
     def forwardPass(self, alpha, i):
         cost_try = 0.
-        self.m = self.Beta1 * self.m + (1 - self.Beta1) * (self.dJdu)
-        self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu**2)
+        self.m = self.Beta1 * self.m + (1-self.Beta1) * self.dJdu
+        self.v = self.Beta2 * self.v + (1-self.Beta2) * (self.dJdu - self.dJdu_p)
+        self.n = self.Beta3 * self.n + (1-self.Beta3) * (self.dJdu + self.Beta2*(self.dJdu - self.dJdu_p))**2
+
         if self.bias_correction:
             m_corrected = self.m / (1 - self.Beta1 ** (i + 2))
             v_corrected = self.v / (1 - self.Beta2 ** (i + 2))
+            n_corrected = self.n / (1 - self.Beta3 ** (i + 2))
         else:
             m_corrected = self.m
             v_corrected = self.v
-        update = m_corrected / (np.sqrt(v_corrected) + self.eps)
+            n_corrected = self.n
+        update = (m_corrected + self.Beta2 * v_corrected) / (np.sqrt(n_corrected) + self.eps)
         us = np.array(self.us)
         us_try = us - alpha * update
         self.us_try = list(us_try)
-        #pdb.set_trace()
+
         # need to make sure self.xs_try[0] = x0
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             model.calc(data, self.xs_try[t], self.us_try[t])
@@ -111,7 +115,7 @@ class SolverADAM(SolverAbstract):
         self.cost_try = self.forwardPass(alpha, i)
         return self.cost - self.cost_try
 
-    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False, alpha=None):
+    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False, alpha=.01):
         # ___________________ Initialize ___________________#
         if init_xs is None:
             init_xs = [np.zeros(m.state.nx) for m in self.models()]
@@ -127,15 +131,9 @@ class SolverADAM(SolverAbstract):
         if self.refresh:
             self.refresh_()
         else:
-            #pdb.set_trace()
-            m = list(self.m[1:]) + [self.m[-1]]
-            v = list(self.v[1:]) + [self.v[-1]]
-            self.m = np.array(m)
-            self.v = np.array(v)
-            self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-            self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
+            self.warmStart_()
 
-        self.setCandidate(init_xs, init_us, True)
+        self.setCandidate(init_xs, init_us, False)
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
         self.costs.append(self.cost)
@@ -185,30 +183,48 @@ class SolverADAM(SolverAbstract):
             self.n_little_improvement += 1
             if VERBOSE: print('Little improvement.')
 
+
+    def warmStart_(self):
+        m = list(self.m[1:]) + [self.m[-1]]
+        v = list(self.v[1:]) + [self.v[-1]]
+        n = list(self.n[1:]) + [self.n[-1]]
+        self.m = np.array(m)
+        self.v = np.array(v)
+        self.n = np.array(n)
+        self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
+        self.costs = []
+        self.KKTs = []
     def refresh_(self):
         self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.dJdu_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
         self.m = np.zeros_like(self.dJdu)
         self.v = np.zeros_like(self.dJdu)
+        self.n = np.zeros_like(self.dJdu)
+        self.costs = []
+        self.KKTs = []
+
     def allocateData(self):
 
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
         self.xs_try[0][:] = self.problem.x0.copy()
         self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]
         self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.dJdu_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
         self.m = np.zeros_like(self.dJdu)
         self.v = np.zeros_like(self.dJdu)
-        self.Beta1 = .9
-        self.Beta2 = .999
+        self.n = np.zeros_like(self.dJdu)
+        self.Beta1 = .98
+        self.Beta2 = .99
+        self.Beta3 = .99
         self.eps = 1e-8
         self.kkt = 0.
         self.KKTs = []
         self.costs = []
         self.numIter = 0
-        self.decay1 = 1.
-        self.decay2 = 1.
-        self.bias_correction = True
+        self.bias_correction = False
         self.refresh = False
 
 

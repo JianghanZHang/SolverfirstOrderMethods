@@ -24,7 +24,7 @@ def raiseIfNan(A, error=None):
         raise error
 
 
-class SolverADAM(SolverAbstract):
+class SolverAMSGRAD(SolverAbstract):
     def __init__(self, shootingProblem):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
@@ -82,19 +82,21 @@ class SolverADAM(SolverAbstract):
 
     def forwardPass(self, alpha, i):
         cost_try = 0.
-        self.m = self.Beta1 * self.m + (1 - self.Beta1) * (self.dJdu)
+        self.v_max_p = self.v_max
+        self.m = self.Beta1 * self.m + (1 - self.Beta1) * self.dJdu
         self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu**2)
+        self.v_max = np.maximum(self.v_max_p, self.v)
         if self.bias_correction:
             m_corrected = self.m / (1 - self.Beta1 ** (i + 2))
-            v_corrected = self.v / (1 - self.Beta2 ** (i + 2))
+            v_corrected = self.v_max / (1 - self.Beta2 ** (i + 2))
         else:
             m_corrected = self.m
-            v_corrected = self.v
+            v_corrected = self.v_max
         update = m_corrected / (np.sqrt(v_corrected) + self.eps)
         us = np.array(self.us)
         us_try = us - alpha * update
         self.us_try = list(us_try)
-        #pdb.set_trace()
+
         # need to make sure self.xs_try[0] = x0
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             model.calc(data, self.xs_try[t], self.us_try[t])
@@ -125,17 +127,18 @@ class SolverADAM(SolverAbstract):
             init_xs = self.problem.rollout(init_us)
 
         if self.refresh:
-            self.refresh_()
+            self.refresh()
         else:
-            #pdb.set_trace()
             m = list(self.m[1:]) + [self.m[-1]]
             v = list(self.v[1:]) + [self.v[-1]]
+            v_max = list(self.v_max[1:]) + [self.v_max[-1]]
             self.m = np.array(m)
             self.v = np.array(v)
-            self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-            self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
+            self.v_max = np.array(v_max)
+            self.v = (self.decay2) * self.v
+            self.v_max = (self.decay2) * self.v
 
-        self.setCandidate(init_xs, init_us, True)
+        self.setCandidate(init_xs, init_us, False)
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
         self.costs.append(self.cost)
@@ -151,7 +154,6 @@ class SolverADAM(SolverAbstract):
 
                 except:
                     print('In', i, 'th iteration.')
-                    #pdb.set_trace()
                     raise BaseException("Backward Pass Failed")
                 break
 
@@ -170,7 +172,6 @@ class SolverADAM(SolverAbstract):
             self.setCandidate(self.xs_try, self.us_try, isFeasible)
             self.cost = self.cost_try
             self.costs.append(self.cost)
-            self.alpha_p = alpha
 
             self.stoppingCriteria()
 
@@ -186,10 +187,15 @@ class SolverADAM(SolverAbstract):
             if VERBOSE: print('Little improvement.')
 
     def refresh_(self):
+
         self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
         self.m = np.zeros_like(self.dJdu)
         self.v = np.zeros_like(self.dJdu)
+        self.v_max = np.zeros_like(self.dJdu)
+        self.v_max_p = np.zeros_like(self.dJdu)
+        self.kkt = 0.
+
     def allocateData(self):
 
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
@@ -206,9 +212,11 @@ class SolverADAM(SolverAbstract):
         self.KKTs = []
         self.costs = []
         self.numIter = 0
+        self.bias_correction = True
+        self.v_max = np.zeros_like(self.dJdu)
+        self.v_max_p = np.zeros_like(self.dJdu)
         self.decay1 = 1.
         self.decay2 = 1.
-        self.bias_correction = True
         self.refresh = False
 
 

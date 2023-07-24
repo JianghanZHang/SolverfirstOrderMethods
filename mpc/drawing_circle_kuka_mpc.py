@@ -10,14 +10,19 @@ from solverILQR import SolverILqr
 from solverLBGFS_vectorized import SolverLBGFS
 from solverGD import SolverGD
 import matplotlib.pyplot as plt
-from solverNAG import SolverNAG
+from solverNAG_lineSearch import SolverNAG
 from solverADAM import SolverADAM
+from solverAMSGRAD import SolverAMSGRAD
+from solverNADAM import SolverNADAM
+from solverADAN import SolverADAN
+
 import time
 
 np.set_printoptions(precision=4, linewidth=180)
 
-def solveOCP(solver, x_curr, us_prev, targets, maxIter, alpha = None):
+def solveOCP(solver, x_curr, us_prev, targets, maxIter, alpha=None):
     solver.problem.x0 = x_curr
+
     us_init = list(us_prev[1:]) + [us_prev[-1]]
     xs_init = list(solver.xs[1:]) + [solver.xs[-1]]
     xs_init[0] = x_curr
@@ -105,12 +110,15 @@ if __name__ == '__main__':
     gd = SolverGD(problem)
     nag = SolverNAG(problem)
     adam = SolverADAM(problem)
+    NAdam = SolverNADAM(problem)
+    amsGrad = SolverAMSGRAD(problem)
+    adan = SolverADAN(problem)
 
     time_ = 2.
     t = 0.
     dt_sim = env.dt  # 1e-3
     sim_freq = 1/dt_sim
-    dt_mpc = 1e-3
+    dt_mpc = env.dt
     mpc_freq = 1/dt_mpc
     num_step = int(time_ / dt_sim)
 
@@ -118,9 +126,10 @@ if __name__ == '__main__':
     x_measured = x0
     xs_init = [x0 for i in range(T + 1)]
     us_init = ddp.problem.quasiStatic(xs_init[:-1])
-    ddp.solve(xs_init, us_init, False)
-    us = np.array(ddp.us)
-    xs = np.array(ddp.xs)
+    targets = circleTraj(T, t, dt_ocp)
+    us, xs, runningCost, totalCost, kkt = solveOCP(ddp, x0, us_init, targets, 1000)
+    us = np.array(us)
+    xs = np.array(xs)
 
     mpc_utils.display_ball(ee_translation, RADIUS=.05, COLOR=[1., 0., 0., .6])
     q_measured = q0
@@ -129,21 +138,40 @@ if __name__ == '__main__':
     runningCosts = []
     KKTs = []
     ee_positions = []
-    # Simulating with MPC freq == simulation freq
-    maxIter = 10
+    cost_examples = []
+    kkt_examples = []
+
     log_rate = 100
-    alpha = 1
+    #alpha = .5
+    solver = adan
+    solver.Beta1 = .9
+    solver.Beta2 = .9
+    solver.Beta3 = .999
+    solver.decay1 = 1.
+    solver.decay2 = 1.
+    solver.bias_correction = True
+    solver.refresh = False
     for i in range(num_step):
 
         tau_gravity = pin.rnea(pin_robot.model, pin_robot.data, q_measured, np.zeros_like(q_measured), np.zeros_like(q_measured))
 
         if i % (int(sim_freq / mpc_freq)) == 0:
             targets = circleTraj(T, t, dt_ocp)
-            us, xs, runningCost, totalCost, kkt = solveOCP(adam, x_measured, us, targets, maxIter, alpha)
+            if i < 1:
+                maxIter = 1000
+                alpha = .05
+            else:
+                maxIter = 10
+                alpha = .4
+            us, xs, runningCost, totalCost, kkt = solveOCP(solver, x_measured, us, targets, maxIter, alpha)
             runningCosts.append(runningCost)
             totalCosts.append(totalCost)
             KKTs.append(kkt)
             tau = us[0]
+           # pdb.set_trace()
+            if i in range(0, 2000, 100):
+                cost_examples.append(solver.costs)
+                kkt_examples.append(solver.KKTs)
 
             if i % log_rate == 0:
                 print(f'at step {i}: tau={tau}')
@@ -161,10 +189,32 @@ if __name__ == '__main__':
 
     ee_positions = np.array(ee_positions)
 
+    for t, (cost_example, kkt_example) in enumerate(zip(cost_examples, kkt_examples)):
+
+        fig, (ax1, ax2) = plt.subplots(2, sharex=True, figsize=(10, 15))
+
+        fig.suptitle(f'in {t} example', fontsize=16)
+
+        color = 'tab:blue'
+        ax1.set_ylabel('Costs', color=color)
+        ax1.plot(cost_example[:], color=color, linestyle='-')
+        ax1.tick_params(axis='y', labelcolor=color)
+        ax1.set_xlabel('Iteration')  # Set the x-axis label
+        ax1.grid(True)
+
+        color = 'tab:red'
+        ax2.set_ylabel('totalCost of OCP', color=color)
+        ax2.plot(np.log10(kkt_example[:]), color=color, linestyle='-')
+        ax2.tick_params(axis='y', labelcolor=color)
+        ax2.set_xlabel('Iteration')  # Set the x-axis label
+        ax2.grid(True)
+
     # Set the figure size
     fig1, (ax1, ax2, ax3, ax4, ax5, ax6) = plt.subplots(6, sharex=True, figsize=(10, 15))
 
-    fig1.suptitle(f'ADAM online Metrics, Horizon Length={T}, maxIter={maxIter}, lr={alpha}', fontsize=16)
+    fig1.suptitle(f'online Metrics, Sovler={solver}, Horizon_length={T},\n Max_iteration={maxIter},'
+                  f'lr={alpha},  Betas={solver.Beta1, solver.Beta2}'
+                  f'Bias_correction = {solver.bias_correction}, Refresh_moment = {solver.refresh}', fontsize=16)
 
     color = 'tab:blue'
     ax1.set_ylabel('runningCost', color=color)
@@ -174,7 +224,7 @@ if __name__ == '__main__':
     ax1.grid(True)
 
     color = 'tab:red'
-    ax2.set_ylabel('totalCost of OCP', color=color)
+    ax2.set_ylabel('KKT(log10)', color=color)
     ax2.plot(totalCosts[:], color=color, linestyle='-')
     ax2.tick_params(axis='y', labelcolor=color)
     ax2.set_xlabel('Iteration')  # Set the x-axis label
@@ -208,7 +258,7 @@ if __name__ == '__main__':
     ax6.set_xlabel('Iteration')  # Set the x-axis label
     ax6.grid(True)
 
-    plt.savefig(f'plots/online/ADAM_online_noGravComp2.png')
+    plt.savefig(f'plots/online/ADAN_online_2.png')
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.95)

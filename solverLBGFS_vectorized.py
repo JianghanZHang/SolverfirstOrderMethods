@@ -215,27 +215,27 @@ class SolverLBGFS(SolverAbstract):
             self.curvature_curr = self.calcCurvature()
             # Computing new curvature(alpha_i), the curvature was computed using us_try=us + alpha_i*direction.
 
-            # if DEBUGGING:
-            #     print(f'in iteration {i}:')
-            #     print(f'current_alpha: {self.alpha}, direction:{self.direction}')
-            #     print(f'cost_try: {self.cost_try}; curvature(current_alpha): {self.curvature_curr}')
-            #     print(f'cost: {self.cost}; curvature(0): {self.curvature_0}')
-            #     print(f'cost_try_previous: {self.cost_try_p}')
+            if DEBUGGING:
+                print(f'in iteration {i}:')
+                print(f'current_alpha: {self.alpha}, direction:{self.direction}')
+                print(f'cost_try: {self.cost_try}; curvature(current_alpha): {self.curvature_curr}')
+                print(f'cost: {self.cost}; curvature(0): {self.curvature_0}')
+                print(f'cost_try_previous: {self.cost_try_p}')
 
             if self.cost_try > self.cost + self.c1 * self.alpha * self.curvature_0 or \
                     (self.cost_try >= self.cost_try_p and i > 1) or np.isnan(self.cost_try):
                 # sufficient decrease was not satisfied
                 if i != 0:
-                    #if DEBUGGING: print(f'going into zoom because sufficient decrease condition failed.')
+                    if DEBUGGING: print(f'going into zoom because sufficient decrease condition failed.')
                     return self.zoom(reversed=False)
                 else:
-                    #if DEBUGGING: print(f'reset alpha')
+                    if DEBUGGING: print(f'reset alpha')
                     self.alpha_p = 0
                     self.alpha = 2 ** (-self.k)
                     continue
 
             if abs(self.curvature_curr) <= -self.c2 * self.curvature_0:  # curvature(alpha = 0) is from forwardPass
-                #if VERBOSE: print('line search succeed.')
+                if VERBOSE: print('line search succeed.')
                 self.alpha_prevIter = self.alpha
                 # current alpha satisfy Wolfe condition -> stop line search
                 return True
@@ -245,10 +245,10 @@ class SolverLBGFS(SolverAbstract):
             if self.curvature_curr >= 0:
                 # alphas_i overshoot -> going into reversed zoom
                 if i != 0:
-                    #if DEBUGGING: print(f'in iteration {i}, going into zoom because current curvature is positive.')
+                    if DEBUGGING: print(f'in iteration {i}, going into zoom because current curvature is positive.')
                     return self.zoom(reversed=True)
                 else:
-                    #if DEBUGGING: print(f'reset alpha')
+                    if DEBUGGING: print(f'reset alpha')
                     self.alpha_p = 0
                     self.alpha = 2 ** (-self.k)
                     continue
@@ -322,8 +322,6 @@ class SolverLBGFS(SolverAbstract):
     def cubicInterpolation(self, alpha_l, alpha_r, curvature_l, curvature_r, cost_try_l, cost_try_r):
         # Note: it is possible to have alpha_i < alpha_i-1
 
-        #return min(alpha_l, alpha_r) + .1 * max(alpha_r, alpha_l)
-
         if DEBUGGING: print('in cubicInterpolation:')
 
         d1 = curvature_l + curvature_r - 3 * ((cost_try_l - cost_try_r) / (alpha_l - alpha_r))
@@ -365,7 +363,6 @@ class SolverLBGFS(SolverAbstract):
         for i in range(maxIter):
             start_time = time.time()
             self.numIter = i
-            recalc = True  # this will recalculate derivatives in computeDirection
             while True:  # backward pass
                 try:
                     self.computeDirection(i, recalc=True)

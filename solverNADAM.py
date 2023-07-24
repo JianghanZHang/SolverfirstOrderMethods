@@ -1,4 +1,4 @@
-import pdb
+#https://towardsdatascience.com/complete-guide-to-adam-optimization-1e5f29532c3d
 
 import numpy as np
 from numpy import linalg
@@ -23,7 +23,7 @@ def raiseIfNan(A, error=None):
         raise error
 
 
-class SolverGD(SolverAbstract):
+class SolverNADAM(SolverAbstract):
     def __init__(self, shootingProblem):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
@@ -75,18 +75,22 @@ class SolverGD(SolverAbstract):
             self.dJdu[t, :] = data.Lu + self.dJdx[t+1, :] @ data.Fu
             self.dJdx[t, :] = data.Lx + self.dJdx[t+1, :] @ data.Fx
 
-
         self.Qu = self.dJdu
         self.kkt = linalg.norm(self.Qu, 2)
         self.KKTs.append(self.kkt)
-        #pdb.set_trace()
 
-
-    def forwardPass(self, alpha):
+    def forwardPass(self, alpha, i):
         cost_try = 0.
+        self.m = self.Beta1 * self.m + (1 - self.Beta1) * self.dJdu
+        self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu**2)
+        grad_corrected = self.dJdu / (1 - self.Beta1 ** (i+1))
+        m_corrected = self.Beta1 * (self.m / (1 - self.Beta1 ** (i+2))) + (1-self.Beta1) * grad_corrected
+        v_corrected = (self.Beta2 * self.v) / (1 - self.Beta2 ** (i+2))
+        update = m_corrected / (np.sqrt(v_corrected) + self.eps)
         us = np.array(self.us)
-        us_try = us - alpha * self.dJdu
+        us_try = us - alpha * update
         self.us_try = list(us_try)
+
         # need to make sure self.xs_try[0] = x0
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             model.calc(data, self.xs_try[t], self.us_try[t])
@@ -99,10 +103,8 @@ class SolverGD(SolverAbstract):
 
         return cost_try
 
-    def tryStep(self, alpha):
-        self.direction_p = self.direction
-        self.cost_try = self.forwardPass(alpha)
-
+    def tryStep(self, alpha, i):
+        self.cost_try = self.forwardPass(alpha, i)
         return self.cost - self.cost_try
 
     def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False, alpha=.01):
@@ -117,6 +119,8 @@ class SolverGD(SolverAbstract):
 
         if not isFeasible:
             init_xs = self.problem.rollout(init_us)
+
+        self.refresh_()
 
         self.setCandidate(init_xs, init_us, False)
 
@@ -141,12 +145,12 @@ class SolverGD(SolverAbstract):
 
             while True:  # forward pass with line search
                 try:
-                    self.tryStep(alpha)
+                    self.tryStep(alpha, i)
 
                 except:
                     # repeat starting from a smaller alpha
                     print("Try Step Failed for alpha = %s" % alpha)
-
+                    raise BaseException("Backward Pass Failed")
                 break
 
             self.dV = self.cost - self.cost_try
@@ -168,19 +172,28 @@ class SolverGD(SolverAbstract):
             self.n_little_improvement += 1
             if VERBOSE: print('Little improvement.')
 
-    def allocateData(self):
 
+    def refresh_(self):
+        self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
+        self.m = np.zeros_like(self.dJdu)
+        self.v = np.zeros_like(self.dJdu)
+
+    def allocateData(self):
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
         self.xs_try[0][:] = self.problem.x0.copy()
         self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]
         self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
-        self.alpha_p = 0
-        self.dJdu_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-        self.direction = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-        self.direction_p = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
-        self.numIter = 0
-        self.costs = []
+        self.m = np.zeros_like(self.dJdu)
+        self.v = np.zeros_like(self.dJdu)
+        self.Beta1 = .9
+        self.Beta2 = .999
+        self.eps = 1e-8
         self.kkt = 0.
         self.KKTs = []
+        self.costs = []
+        self.numIter = 0
+        self.refresh = False
+
 

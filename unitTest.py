@@ -3,10 +3,11 @@ import pdb
 import crocoddyl
 import numpy as np
 from solverILQR import SolverILqr
-from solverGD import SolverGD
-from solverNAG import SolverNAG
+from solverGD_backTracking import SolverGD
+from solverNAG_lineSearch import SolverNAG
 from solverLBGFS_vectorized import SolverLBGFS
 from solverADAM import SolverADAM
+from solverADAN import SolverADAN
 import time
 
 from example import quadrotor_problem
@@ -14,8 +15,9 @@ from example import arm_manipulation_problem
 from example import humanoid_taichi_problem
 import matplotlib.pyplot as plt
 
+
 class Tester:
-    def __init__(self, NX=6, NU=3, T=30, maxIter=1000000):
+    def __init__(self, NX=6, NU=3, T=30, maxIter=10000):
         self.NX = NX
         self.NU = NU
         self.T = T
@@ -81,7 +83,7 @@ class Tester:
         self.init_us = problem.quasiStatic([problem.x0] * problem.T)
         self.init_xs = problem.rollout(self.init_us)
         start_time = time.time()
-        self.NAG.solve(self.init_xs, self.init_us, self.maxIter, alpha=.01)
+        self.NAG.solve(self.init_xs, self.init_us, self.maxIter)
         end_time = time.time()
         return end_time - start_time
 
@@ -94,41 +96,51 @@ class Tester:
         end_time = time.time()
         return end_time - start_time
 
+    def testADAN(self, problem):
+        self.ADAN = SolverADAN(problem)
+        self.ADAN.bias_correction = True
+        self.init_us = problem.quasiStatic([problem.x0] * problem.T)
+        self.init_xs = problem.rollout(self.init_us)
+        start_time = time.time()
+        self.ADAN.solve(self.init_xs, self.init_us, self.maxIter, alpha=.1)
+        end_time = time.time()
+        return end_time - start_time
+
 if __name__ == '__main__':
     T = 20
     tester = Tester(T=T)
 
     problem = tester.problem_lqr
 
-    tester.testILQR(problem)
+    #tester.testNAG(problem)
 
-    tester.testADAM(problem)
+    tester.testILQR(problem)
+    tester.testNAG(problem)
+    #tester.testGD(problem)
+
+
 
     print(f'optimal control form iLQR solver: {tester.iLQR.us[0][:]}, cost= {tester.iLQR.cost}, '
           f'total number of iterations={tester.iLQR.numIter}, # initial guess of alpha accepted={sum(tester.iLQR.guess_accepted)}')
-    # print(f'optimal control form LBFGS solver: {tester.LBFGS.us[0][:]}, cost= {tester.LBFGS.cost}, '
-    #       f'total number of iterations={tester.LBFGS.numIter}, # initial guess of alpha accepted={sum(tester.LBFGS.guess_accepted)}, '
-    #       f'average magnitude of direction={sum(tester.LBFGS.directions)/len(tester.LBFGS.directions)}')
-    print(f'optimal control form NAG solver: {tester.ADAM.us[0][:]}, cost= {tester.ADAM.cost}, '
-          f'total number of iterations={tester.ADAM.numIter}')
 
-    start = 0
-    end = -1
+    print(f'optimal control form NAG solver: {tester.NAG.us[0][:]}, cost= {tester.NAG.cost}, '
+          f'total number of iterations={tester.NAG.numIter}')#, # initial guess of alpha accepted={sum(tester.ADAN.guess_accepted)}')
+
     # Set the figure size
     fig1, (ax1, ax2) = plt.subplots(2, sharex=True, figsize=(10, 15))
 
-    fig1.suptitle(f'ADAM Solver Metrics, T={T}', fontsize=16)
+    fig1.suptitle(f'NAG Solver Metrics, T={T}', fontsize=16)
 
     color = 'tab:blue'
     ax1.set_ylabel('Cost', color=color)
-    ax1.plot(tester.ADAM.costs[:], color=color, linestyle='-')
+    ax1.plot(tester.NAG.costs[:], color=color, linestyle='-')
     ax1.tick_params(axis='y', labelcolor=color)
     ax1.set_xlabel('Iteration')  # Set the x-axis label
     ax1.grid(True)
 
     color = 'tab:red'
     ax2.set_ylabel('KKT(log10)', color=color)
-    ax2.plot(np.log10(tester.ADAM.KKTs[:]), color=color, linestyle='-')
+    ax2.plot(np.log10(tester.NAG.KKTs[:]), color=color, linestyle='-')
     ax2.tick_params(axis='y', labelcolor=color)
     ax2.set_xlabel('Iteration')  # Set the x-axis label
     ax2.grid(True)

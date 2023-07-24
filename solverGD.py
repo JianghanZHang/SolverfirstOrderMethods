@@ -1,12 +1,8 @@
-import pdb
-
 import numpy as np
 from numpy import linalg
-
 import scipy.linalg as scl
 import crocoddyl
 from crocoddyl import SolverAbstract
-
 LINE_WIDTH = 100
 
 VERBOSE = False

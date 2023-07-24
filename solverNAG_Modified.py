@@ -1,3 +1,6 @@
+"""
+http://www.damtp.cam.ac.uk/user/hf323/M19-OPT/lecture5.pdf
+"""
 import numpy as np
 from numpy import linalg
 import pdb
@@ -10,17 +13,14 @@ LINE_WIDTH = 100
 
 VERBOSE = False
 
-
 def rev_enumerate(l):
     return reversed(list(enumerate(l)))
-
 
 def raiseIfNan(A, error=None):
     if error is None:
         error = scl.LinAlgError("NaN in array")
     if np.any(np.isnan(A)) or np.any(np.isinf(A)) or np.any(abs(np.asarray(A)) > 1e30):
         raise error
-
 
 class SolverNAG(SolverAbstract):
     def __init__(self, shootingProblem):
@@ -101,11 +101,10 @@ class SolverNAG(SolverAbstract):
         us = np.array(self.us)  # x_k
         # tmp = (self.theta_p ** 2) * (alpha / self.alpha_p)  # a^2 = theta_k-1^2 * (t_k/t_k-1)
         # self.theta = .5 * (-np.sqrt(tmp) + np.sqrt(tmp + 4))  # theta_k = (-a+sqrt(a^2+4))/2
-        self.theta =  (np.sqrt(alpha) * self.theta_p * np.sqrt(4*self.alpha_p+alpha * (self.theta_p**2))
+        self.theta = (np.sqrt(alpha) * self.theta_p * np.sqrt(4*self.alpha_p+alpha * (self.theta_p**2))
                        -(alpha * (self.theta_p**2))) / (2 * self.alpha_p)
 
-        #assert ((1-self.theta) * alpha) / self.theta**2 <= self.alpha_p / self.theta_p**2
-        if not abs(((1-self.theta) * alpha) / self.theta**2 - self.alpha_p / self.theta_p**2) < 1e-6: pdb.set_trace()
+        assert abs(((1-self.theta) * alpha) / self.theta**2 - self.alpha_p / self.theta_p**2) < 1e-6
         self.y = (1 - self.theta) * us + self.theta * self.v  # y = (1 - theta_k) * x_k + theta_k * v_k
         cost_y = self.forwardPass(self.y)  # compute f(y)
         gradient_norm_y = self.calcGradientNorm()  # compute ||grad(f(y))||
@@ -146,7 +145,7 @@ class SolverNAG(SolverAbstract):
             # if self.kkt < self.th_stop:
             #     print('Converged')
             #     return True
-            self.alpha = 1.
+            self.alpha = 2.
             for k in range(15):
 
                 while True:
@@ -169,7 +168,7 @@ class SolverNAG(SolverAbstract):
                     self.alpha *= .5
                     print(f'alpha= {self.alpha}')
 
-                if self.alpha < 2 ** (-14):
+                if self.alpha < 2 ** (-10):
                     print(f'line search failed')
                     return False
 
