@@ -9,12 +9,13 @@ import mpc_utils
 from solverILQR import SolverILqr
 from solverLBGFS_vectorized import SolverLBGFS
 from solverGD import SolverGD
+
 import matplotlib.pyplot as plt
 from solverNAG_lineSearch import SolverNAG
 from solverADAM import SolverADAM
 from solverAMSGRAD import SolverAMSGRAD
 from solverNADAM import SolverNADAM
-from solverADAN import SolverADAN
+from solverADAN_lineSearch import SolverADAN
 
 import time
 
@@ -32,7 +33,7 @@ def solveOCP(solver, x_curr, us_prev, targets, maxIter, alpha=None):
     for k, model in enumerate(models):
         model.differential.costs.costs["translation"].active = True
         model.differential.costs.costs["translation"].cost.residual.reference = targets[k]
-        model.differential.costs.costs["translation"].weight = 1e2
+        model.differential.costs.costs["translation"].weight = 100
 
     if alpha is None:
         solver.solve(xs_init, us_init, maxIter, False)
@@ -65,7 +66,7 @@ def circleTraj(T, t, dt):
 
 if __name__ == '__main__':
 
-    env = BulletEnvWithGround(p.GUI, dt=1e-3)
+    env = BulletEnvWithGround(p.GUI, dt=1e-2)
     robot_simulator = IiwaRobot()
     pin_robot = robot_simulator.pin_robot
     q0 = np.array([0.9755, 1.2615, 1.7282, 1.8473, -1.0791, 2.0306, -0.0759])
@@ -90,10 +91,10 @@ if __name__ == '__main__':
     xRegCost = crocoddyl.CostModelResidual(state, xResidual)
     runningCostModel.addCost("stateReg", xRegCost, 1e-1)
     runningCostModel.addCost("ctrlRegGrav", uRegCost, 1e-4)
-    runningCostModel.addCost("translation", frameTranslationCost, 1e2)
+    runningCostModel.addCost("translation", frameTranslationCost, 100)
 
     terminalCostModel.addCost("stateReg", xRegCost, 1e-1)
-    terminalCostModel.addCost("translation", frameTranslationCost, 1e2)
+    terminalCostModel.addCost("translation", frameTranslationCost, 100)
 
     running_DAM = crocoddyl.DifferentialActionModelFreeFwdDynamics(state, actuation, runningCostModel)
     terminal_DAM = crocoddyl.DifferentialActionModelFreeFwdDynamics(state, actuation, terminalCostModel)
@@ -140,16 +141,19 @@ if __name__ == '__main__':
     ee_positions = []
     cost_examples = []
     kkt_examples = []
+    update_examples = []
+    curvature_examples = []
 
     log_rate = 100
-    #alpha = .5
+    #alpha = 1.
     solver = adan
     solver.Beta1 = .9
     solver.Beta2 = .9
     solver.Beta3 = .999
     solver.decay1 = 1.
     solver.decay2 = 1.
-    solver.bias_correction = True
+    solver.decay3 = 1.
+    solver.bias_correction = False
     solver.refresh = False
     for i in range(num_step):
 
@@ -157,21 +161,18 @@ if __name__ == '__main__':
 
         if i % (int(sim_freq / mpc_freq)) == 0:
             targets = circleTraj(T, t, dt_ocp)
-            if i < 1:
-                maxIter = 1000
-                alpha = .05
-            else:
-                maxIter = 10
-                alpha = .4
-            us, xs, runningCost, totalCost, kkt = solveOCP(solver, x_measured, us, targets, maxIter, alpha)
+            maxIter = 10
+            us, xs, runningCost, totalCost, kkt = solveOCP(adan, x_measured, us, targets, maxIter) # , alpha)
             runningCosts.append(runningCost)
             totalCosts.append(totalCost)
             KKTs.append(kkt)
             tau = us[0]
            # pdb.set_trace()
-            if i in range(0, 2000, 100):
-                cost_examples.append(solver.costs)
-                kkt_examples.append(solver.KKTs)
+           #  if i in range(0, 200, 20):
+           #      cost_examples.append(solver.costs)
+           #      kkt_examples.append(solver.KKTs)
+           #      update_examples.append(solver.updates)
+           #      curvature_examples.append(solver.curvatures)
 
             if i % log_rate == 0:
                 print(f'at step {i}: tau={tau}')
@@ -189,78 +190,94 @@ if __name__ == '__main__':
 
     ee_positions = np.array(ee_positions)
 
-    for t, (cost_example, kkt_example) in enumerate(zip(cost_examples, kkt_examples)):
+    # for t, (cost_example, kkt_example, update_example, curvature_example) \
+    #         in enumerate(zip(cost_examples, kkt_examples, update_examples, curvature_examples)):
+    #
+    #     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, sharex=True, figsize=(10, 15))
+    #
+    #     fig.suptitle(f'in {t} example', fontsize=16)
+    #
+    #     color = 'tab:blue'
+    #     ax1.set_ylabel('Costs', color=color)
+    #     ax1.plot(cost_example[:], color=color, linestyle='-')
+    #     ax1.tick_params(axis='y', labelcolor=color)
+    #     ax1.set_xlabel('Iteration')  # Set the x-axis label
+    #     ax1.grid(True)
+    #
+    #     color = 'tab:red'
+    #     ax2.set_ylabel('L2 norm of gradients', color=color)
+    #     ax2.plot(kkt_example[:], color=color, linestyle='-')
+    #     ax2.tick_params(axis='y', labelcolor=color)
+    #     ax2.set_xlabel('Iteration')  # Set the x-axis label
+    #     ax2.grid(True)
+    #
+    #     color = 'tab:green'
+    #     ax3.set_ylabel('L2 norm of updating vector', color=color)
+    #     ax3.plot(update_example[:], color=color, linestyle='-')
+    #     ax3.tick_params(axis='y', labelcolor=color)
+    #     ax3.set_xlabel('Iteration')  # Set the x-axis label
+    #     ax3.grid(True)
+    #
+    #     color = 'tab:blue'
+    #     ax4.set_ylabel('Curvature', color=color)
+    #     ax4.plot(curvature_example[:], color=color, linestyle='-')
+    #     ax4.tick_params(axis='y', labelcolor=color)
+    #     ax4.set_xlabel('Iteration')  # Set the x-axis label
+    #     ax4.grid(True)
+    #
 
-        fig, (ax1, ax2) = plt.subplots(2, sharex=True, figsize=(10, 15))
-
-        fig.suptitle(f'in {t} example', fontsize=16)
-
-        color = 'tab:blue'
-        ax1.set_ylabel('Costs', color=color)
-        ax1.plot(cost_example[:], color=color, linestyle='-')
-        ax1.tick_params(axis='y', labelcolor=color)
-        ax1.set_xlabel('Iteration')  # Set the x-axis label
-        ax1.grid(True)
-
-        color = 'tab:red'
-        ax2.set_ylabel('totalCost of OCP', color=color)
-        ax2.plot(np.log10(kkt_example[:]), color=color, linestyle='-')
-        ax2.tick_params(axis='y', labelcolor=color)
-        ax2.set_xlabel('Iteration')  # Set the x-axis label
-        ax2.grid(True)
 
     # Set the figure size
     fig1, (ax1, ax2, ax3, ax4, ax5, ax6) = plt.subplots(6, sharex=True, figsize=(10, 15))
 
-    fig1.suptitle(f'online Metrics, Sovler={solver}, Horizon_length={T},\n Max_iteration={maxIter},'
-                  f'lr={alpha},  Betas={solver.Beta1, solver.Beta2}'
+    fig1.suptitle(f'online Metrics, Sovler={solver}, '
+                  f'\nDecays={solver.decay1, solver.decay2, solver.decay3}, Betas={solver.Beta1, solver.Beta2, solver.Beta3 }\n Max_iteration={maxIter},'
                   f'Bias_correction = {solver.bias_correction}, Refresh_moment = {solver.refresh}', fontsize=16)
 
+    start = 0
     color = 'tab:blue'
     ax1.set_ylabel('runningCost', color=color)
-    ax1.plot(totalCosts[:], color=color, linestyle='-')
+    ax1.plot(runningCosts[start:], color=color, linestyle='-')
     ax1.tick_params(axis='y', labelcolor=color)
-    ax1.set_xlabel('Iteration')  # Set the x-axis label
     ax1.grid(True)
 
     color = 'tab:red'
-    ax2.set_ylabel('KKT(log10)', color=color)
-    ax2.plot(totalCosts[:], color=color, linestyle='-')
+    ax2.set_ylabel('totalCosts', color=color)
+    ax2.plot(totalCosts[start:], color=color, linestyle='-')
     ax2.tick_params(axis='y', labelcolor=color)
-    ax2.set_xlabel('Iteration')  # Set the x-axis label
     ax2.grid(True)
 
     color = 'tab:green'
     ax3.set_ylabel('KKT(log10)', color=color)
-    ax3.plot(np.log10(KKTs[:]), color=color, linestyle='-')
+    ax3.plot(np.log10(KKTs[start:]), color=color, linestyle='-')
     ax3.tick_params(axis='y', labelcolor=color)
-    ax3.set_xlabel('Iteration')  # Set the x-axis label
     ax3.grid(True)
 
     color = 'tab:blue'
     ax4.set_ylabel('ee_position_x', color=color)
-    ax4.plot(ee_positions[:, 0], color=color, linestyle='--')
+    ax4.plot(ee_positions[start:, 0], color=color, linestyle='--')
     ax4.tick_params(axis='y', labelcolor=color)
-    ax4.set_xlabel('Iteration')  # Set the x-axis label
     ax4.grid(True)
 
     color = 'tab:red'
     ax5.set_ylabel('ee_position_y', color=color)
-    ax5.plot(ee_positions[:, 1], color=color, linestyle='--')
+    ax5.plot(ee_positions[start:, 1], color=color, linestyle='--')
     ax5.tick_params(axis='y', labelcolor=color)
-    ax5.set_xlabel('Iteration')  # Set the x-axis label
     ax5.grid(True)
 
     color = 'tab:green'
     ax6.set_ylabel('ee_position_z', color=color)
-    ax6.plot(ee_positions[:, 2], color=color, linestyle='--')
+    ax6.plot(ee_positions[start:, 2], color=color, linestyle='--')
     ax6.tick_params(axis='y', labelcolor=color)
-    ax6.set_xlabel('Iteration')  # Set the x-axis label
+    ax6.set_xlabel('time step')  # Set the x-axis label
     ax6.grid(True)
 
-    plt.savefig(f'plots/online/ADAN_online_2.png')
+    plt.savefig(f'plots/online/ADAN_online_5.png')
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.95)
     plt.show()
+    print(f'line search fail: {adan.fail_ls}')
+    print(f'guess accepted: {sum(adan.guess_accepted)}')
+    print(f'line search failed: {sum(adan.lineSearch_fail)}')
 

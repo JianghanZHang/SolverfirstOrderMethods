@@ -13,7 +13,6 @@ LINE_WIDTH = 100
 
 VERBOSE = False
 
-
 def rev_enumerate(l):
     return reversed(list(enumerate(l)))
 
@@ -24,8 +23,7 @@ def raiseIfNan(A, error=None):
     if np.any(np.isnan(A)) or np.any(np.isinf(A)) or np.any(abs(np.asarray(A)) > 1e30):
         raise error
 
-
-class SolverNAG(SolverAbstract):
+class SolverADAN(SolverAbstract):
     def __init__(self, shootingProblem):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
@@ -83,22 +81,37 @@ class SolverNAG(SolverAbstract):
 
     def forwardPass(self, alpha, i):
         cost_try = 0.
-        us = np.array(self.us)
-        self.m = (self.mu * self.m) + ((1+self.mu) * self.dJdu - self.mu * self.dJdu_p)
-        # m_k = MU * m_k-1 + g_k'; g_k' = (1+MU) * g_k - MU * g_k-1
-        if i == 0:
-            self.m = self.dJdu
-        # pdb.set_trace()
-        us_try = us - alpha * self.m
-        self.us_try = list(us_try)
 
+        self.m_p = self.m
+        self.v_p = self.v
+        self.n_p = self.n
+
+        self.m = self.Beta1 * self.m + (1 - self.Beta1) * self.dJdu
+        self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu - self.dJdu_p)
+        self.n = self.Beta3 * self.n + (1 - self.Beta3) * (self.dJdu + self.Beta2 * (self.dJdu - self.dJdu_p)) ** 2
+
+        if self.bias_correction:
+            m_corrected = self.m / (1 - self.Beta1 ** (i + 2))
+            v_corrected = self.v / (1 - self.Beta2 ** (i + 2))
+            n_corrected = self.n / (1 - self.Beta3 ** (i + 3))
+        else:
+            m_corrected = self.m
+            v_corrected = self.v
+            n_corrected = self.n
+        update = alpha * (m_corrected + self.Beta2 * v_corrected) / (np.sqrt(n_corrected) + self.eps)
+        self.updates.append(np.linalg.norm(alpha * update, ord=2))
+        us = np.array(self.us)
+        us_try = us - update
+        self.us_try = list(us_try)
         self.curvature_0 = 0.
-        # need to make sure self.xs_try[0] = x0
+
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             model.calc(data, self.xs_try[t], self.us_try[t])
             self.xs_try[t + 1] = data.xnext
             cost_try += data.cost
             self.curvature_0 += self.dJdu[t, :].T @ self.direction[t, :]
+
+        self.curvatures.append(self.curvature_0)
 
         self.problem.terminalModel.calc(self.problem.terminalData, self.xs_try[-1])
 
@@ -111,11 +124,6 @@ class SolverNAG(SolverAbstract):
         self.cost_try = self.forwardPass(alpha, i)
 
         return self.cost - self.cost_try
-
-    def refresh_(self):
-        self.alpha = 1.
-        self.alpha_p = 1.
-        self.m = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
 
     def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False):
         # ___________________ Initialize ___________________#
@@ -132,7 +140,10 @@ class SolverNAG(SolverAbstract):
 
         self.setCandidate(init_xs, init_us, False)
         # pdb.set_trace()
-        #self.refresh_()
+        if self.refresh:
+            self.refresh_()
+        else:
+            self.warmStart_()
 
         self.cost = self.calc()  # self.forwardPass(1.)  # compute initial value for merit function
         self.costs.append(self.cost)
@@ -140,7 +151,7 @@ class SolverNAG(SolverAbstract):
 
         for i in range(maxIter):
             self.numIter = i
-            self.guess = 1.#min(2 * self.alpha_p, 1)
+            self.guess = 2.  # min(2 * self.alpha_p, 1)
             self.alpha = self.guess
             recalc = True  # this will recalculate derivatives in computeDirection
             while True:  # backward pass
@@ -169,17 +180,34 @@ class SolverNAG(SolverAbstract):
 
                 if self.cost_try <= self.cost + self.c1 * self.alpha * self.curvature_0:
                     # line search succeed -> exit
+                    if self.alpha == self.guess:
+                        self.guess_accepted.append(True)
+                    else:
+                        self.guess_accepted.append(False)
+                    self.lineSearch_fail.append(False)
                     self.setCandidate(self.xs_try, self.us_try, True)
                     self.cost = self.cost_try
                     self.costs.append(self.cost)
                     self.alpha_p = self.alpha
                     break
-                else:
-                    self.alpha *= .5
 
-                if self.alpha < 2**(-15):
-                    print(f'alpha={self.alpha}, line search failed')
-                    return False
+                elif self.alpha < 2 ** (-5):
+                    # keep going anyway
+                    self.lineSearch_fail.append(True)
+                    self.guess_accepted.append(False)
+                    self.setCandidate(self.xs_try, self.us_try, True)
+                    self.cost = self.cost_try
+                    self.costs.append(self.cost)
+                    self.alpha_p = self.alpha
+                    self.fail_ls += 1
+                    break
+
+                else:
+                    # restore momentum terms
+                    self.alpha *= .5
+                    self.m = self.m_p
+                    self.v = self.v_p
+                    self.n = self.n_p
 
             if self.alpha == self.guess:
                 self.guess_accepted.append(True)
@@ -189,6 +217,36 @@ class SolverNAG(SolverAbstract):
             self.stoppingCriteria()
 
         return False
+
+    def warmStart_(self):
+        m = list(self.m[1:]) + [self.m[-1]]
+        v = list(self.v[1:]) + [self.v[-1]]
+        n = list(self.n[1:]) + [self.n[-1]]
+        self.m = self.decay1 * np.array(m)
+        self.v = self.decay2 * np.array(v)
+        self.n = self.decay3 * np.array(n)
+        self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
+        self.costs = []
+        self.KKTs = []
+        self.updates = []
+        self.curvatures = []
+        #self.lineSearch_fail = []
+        #self.guess_accepted = []
+
+    def refresh_(self):
+        self.m = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.v = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.n = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
+        self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
+        self.costs = []
+        self.KKTs = []
+        self.updates = []
+        self.curvatures = []
+        #self.lineSearch_fail = []
+        #self.guess_accepted = []
+
 
     def stoppingCriteria(self):
         if self.dV < 1e-12:
@@ -209,18 +267,30 @@ class SolverNAG(SolverAbstract):
         self.costs = []
         self.kkt = 0.
         self.KKTs = []
-        self.m = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.alpha = 1.
         self.curvature_0 = 0.
         self.alpha_p = 1.
         self.guess_accepted = []
-        self.mu = .7
-        self.y = 0.
-        self.y_p = 0.
-        self.us_p = [np.zeros(m.nu) for m in self.problem.runningModels]
-        self.s = 0.
-        self.s_p = 0.
-        self.v = 0.
-
+        self.m = np.zeros_like(self.dJdu)
+        self.v = np.zeros_like(self.dJdu)
+        self.n = np.zeros_like(self.dJdu)
+        self.Beta1 = .9
+        self.Beta2 = .9
+        self.Beta3 = .999
+        self.eps = 1e-8
+        self.kkt = 0.
+        self.KKTs = []
+        self.costs = []
+        self.numIter = 0
+        self.bias_correction = False
+        self.refresh = False
+        self.updates = []
+        self.curvatures = []
+        self.num_restart = 0
+        self.fail_ls = 0
+        self.decay1 = 1.
+        self.decay2 = 1.
+        self.decay3 = 1.
+        self.lineSearch_fail = []
 
 
