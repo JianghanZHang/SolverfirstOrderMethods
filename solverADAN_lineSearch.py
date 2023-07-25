@@ -98,10 +98,10 @@ class SolverADAN(SolverAbstract):
             m_corrected = self.m
             v_corrected = self.v
             n_corrected = self.n
-        update = alpha * (m_corrected + self.Beta2 * v_corrected) / (np.sqrt(n_corrected) + self.eps)
-        self.updates.append(np.linalg.norm(alpha * update, ord=2))
+
+        self.update = (m_corrected + self.Beta2 * v_corrected) / (np.sqrt(n_corrected) + self.eps)
         us = np.array(self.us)
-        us_try = us - update
+        us_try = us - alpha * self.update
         self.us_try = list(us_try)
         self.curvature_0 = 0.
 
@@ -109,9 +109,7 @@ class SolverADAN(SolverAbstract):
             model.calc(data, self.xs_try[t], self.us_try[t])
             self.xs_try[t + 1] = data.xnext
             cost_try += data.cost
-            self.curvature_0 += self.dJdu[t, :].T @ self.direction[t, :]
-
-        self.curvatures.append(self.curvature_0)
+            self.curvature_0 += self.dJdu[t, :].T @ self.update[t, :]
 
         self.problem.terminalModel.calc(self.problem.terminalData, self.xs_try[-1])
 
@@ -151,7 +149,7 @@ class SolverADAN(SolverAbstract):
 
         for i in range(maxIter):
             self.numIter = i
-            self.guess = 2.  # min(2 * self.alpha_p, 1)
+            self.guess = .5  # min(2 * self.alpha_p, 1)
             self.alpha = self.guess
             recalc = True  # this will recalculate derivatives in computeDirection
             while True:  # backward pass
@@ -189,9 +187,12 @@ class SolverADAN(SolverAbstract):
                     self.cost = self.cost_try
                     self.costs.append(self.cost)
                     self.alpha_p = self.alpha
+                    self.alphas.append(self.alpha)
+                    self.updates.append(np.linalg.norm(self.alpha * self.update, ord=2))
+                    self.curvatures.append(self.curvature_0)
                     break
 
-                elif self.alpha < 2 ** (-5):
+                elif self.alpha < .01:
                     # keep going anyway
                     self.lineSearch_fail.append(True)
                     self.guess_accepted.append(False)
@@ -200,6 +201,10 @@ class SolverADAN(SolverAbstract):
                     self.costs.append(self.cost)
                     self.alpha_p = self.alpha
                     self.fail_ls += 1
+                    self.alphas.append(self.alpha)
+                    self.updates.append(np.linalg.norm(self.alpha * self.update, ord=2))
+                    self.curvatures.append(self.curvature_0)
+
                     break
 
                 else:
@@ -231,8 +236,9 @@ class SolverADAN(SolverAbstract):
         self.KKTs = []
         self.updates = []
         self.curvatures = []
-        #self.lineSearch_fail = []
-        #self.guess_accepted = []
+        self.alphas = []
+        self.lineSearch_fail = []
+        self.guess_accepted = []
 
     def refresh_(self):
         self.m = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
@@ -244,8 +250,9 @@ class SolverADAN(SolverAbstract):
         self.KKTs = []
         self.updates = []
         self.curvatures = []
-        #self.lineSearch_fail = []
-        #self.guess_accepted = []
+        self.alphas = []
+        self.lineSearch_fail = []
+        self.guess_accepted = []
 
 
     def stoppingCriteria(self):
@@ -292,5 +299,6 @@ class SolverADAN(SolverAbstract):
         self.decay2 = 1.
         self.decay3 = 1.
         self.lineSearch_fail = []
+        self.alphas = []
 
 

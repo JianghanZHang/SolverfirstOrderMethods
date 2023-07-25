@@ -12,7 +12,7 @@ from solverGD import SolverGD
 
 import matplotlib.pyplot as plt
 from solverNAG_lineSearch import SolverNAG
-from solverADAM import SolverADAM
+from solverADAM_lineSearch import SolverADAM
 from solverAMSGRAD import SolverAMSGRAD
 from solverNADAM import SolverNADAM
 from solverADAN_lineSearch import SolverADAN
@@ -143,17 +143,18 @@ if __name__ == '__main__':
     kkt_examples = []
     update_examples = []
     curvature_examples = []
+    alpha_examples = []
 
     log_rate = 100
     #alpha = 1.
-    solver = adan
+    solver = adam
     solver.Beta1 = .9
-    solver.Beta2 = .9
-    solver.Beta3 = .999
-    solver.decay1 = 1.
-    solver.decay2 = 1.
-    solver.decay3 = 1.
-    solver.bias_correction = False
+    solver.Beta2 = .999
+    # solver.Beta3 = .999
+    # solver.decay1 = 1.
+    # solver.decay2 = 1.
+    # solver.decay3 = 1.
+    solver.bias_correction = True
     solver.refresh = False
     for i in range(num_step):
 
@@ -162,17 +163,18 @@ if __name__ == '__main__':
         if i % (int(sim_freq / mpc_freq)) == 0:
             targets = circleTraj(T, t, dt_ocp)
             maxIter = 10
-            us, xs, runningCost, totalCost, kkt = solveOCP(adan, x_measured, us, targets, maxIter) # , alpha)
+            us, xs, runningCost, totalCost, kkt = solveOCP(solver, x_measured, us, targets, maxIter)#, alpha)
             runningCosts.append(runningCost)
             totalCosts.append(totalCost)
             KKTs.append(kkt)
             tau = us[0]
-           # pdb.set_trace()
-           #  if i in range(0, 200, 20):
-           #      cost_examples.append(solver.costs)
-           #      kkt_examples.append(solver.KKTs)
-           #      update_examples.append(solver.updates)
-           #      curvature_examples.append(solver.curvatures)
+
+            # if i in range(0, 200, 20):
+            #     cost_examples.append(solver.costs)
+            #     kkt_examples.append(solver.KKTs)
+            #     update_examples.append(solver.updates)
+            #     curvature_examples.append(solver.curvatures)
+            #     alpha_examples.append(solver.alphas)
 
             if i % log_rate == 0:
                 print(f'at step {i}: tau={tau}')
@@ -190,10 +192,10 @@ if __name__ == '__main__':
 
     ee_positions = np.array(ee_positions)
 
-    # for t, (cost_example, kkt_example, update_example, curvature_example) \
-    #         in enumerate(zip(cost_examples, kkt_examples, update_examples, curvature_examples)):
+    # for t, (cost_example, kkt_example, update_example, curvature_example, alpha_example) \
+    #         in enumerate(zip(cost_examples, kkt_examples, update_examples, curvature_examples, alpha_examples)):
     #
-    #     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, sharex=True, figsize=(10, 15))
+    #     fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(5, sharex=True, figsize=(10, 15))
     #
     #     fig.suptitle(f'in {t} example', fontsize=16)
     #
@@ -225,13 +227,20 @@ if __name__ == '__main__':
     #     ax4.set_xlabel('Iteration')  # Set the x-axis label
     #     ax4.grid(True)
     #
+    #     color = 'tab:blue'
+    #     ax5.set_ylabel('Alphas', color=color)
+    #     ax5.plot(alpha_example[:], color=color, linestyle='-')
+    #     ax5.tick_params(axis='y', labelcolor=color)
+    #     ax5.set_xlabel('Iteration')  # Set the x-axis label
+    #     ax5.grid(True)
+    #
 
 
     # Set the figure size
     fig1, (ax1, ax2, ax3, ax4, ax5, ax6) = plt.subplots(6, sharex=True, figsize=(10, 15))
 
     fig1.suptitle(f'online Metrics, Sovler={solver}, '
-                  f'\nDecays={solver.decay1, solver.decay2, solver.decay3}, Betas={solver.Beta1, solver.Beta2, solver.Beta3 }\n Max_iteration={maxIter},'
+                  f'Betas={solver.Beta1, solver.Beta2}\n Max_iteration={maxIter},'
                   f'Bias_correction = {solver.bias_correction}, Refresh_moment = {solver.refresh}', fontsize=16)
 
     start = 0
@@ -272,12 +281,12 @@ if __name__ == '__main__':
     ax6.set_xlabel('time step')  # Set the x-axis label
     ax6.grid(True)
 
-    plt.savefig(f'plots/online/ADAN_online_5.png')
+    plt.savefig(f'plots/online/ADAM_online_withLineSearch0.png')
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.95)
     plt.show()
-    print(f'line search fail: {adan.fail_ls}')
-    print(f'guess accepted: {sum(adan.guess_accepted)}')
-    print(f'line search failed: {sum(adan.lineSearch_fail)}')
+    print(f'line search fail: {solver.fail_ls}')
+    print(f'guess accepted: {sum(solver.guess_accepted)}')
+    print(f'line search failed: {sum(solver.lineSearch_fail)}')
 
