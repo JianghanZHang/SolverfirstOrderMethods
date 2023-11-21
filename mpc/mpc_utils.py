@@ -8,7 +8,7 @@ from matplotlib.collections import LineCollection
 import matplotlib.pyplot as plt
 import matplotlib
 import pin_utils
-from demos import pin_utils
+#  import pin_utils
 import pybullet as p
 
 

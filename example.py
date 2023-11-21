@@ -20,11 +20,12 @@ def arm_manipulation_problem(T):
     # Finally, we use an Euler sympletic integration scheme.
 
     # First, let's load create the state and actuation models
-    kinova = example_robot_data.load("kinova")
-    robot_model = kinova.model
+    robot = example_robot_data.load("ur5")
+    robot_model = robot.model
     state = crocoddyl.StateMultibody(robot_model)
     actuation = crocoddyl.ActuationModelFull(state)
-    q0 = kinova.model.referenceConfigurations["arm_up"]
+    # q0 = kinova.model.referenceConfigurations["arm_up"]
+    q0 = np.zeros(robot_model.nq)
     x0 = np.concatenate([q0, pinocchio.utils.zero(robot_model.nv)])
 
     # Create a cost model per the running and terminal action model.
@@ -32,7 +33,7 @@ def arm_manipulation_problem(T):
     runningCostModel = crocoddyl.CostModelSum(state)
     terminalCostModel = crocoddyl.CostModelSum(state)
 
-    # Note that we need to include a cost model (i.e. set of cost functions) in
+   # Note that we need to include a cost model (i.e. set of cost functions) in
     # order to fully define the action model for our optimal control problem.
     # For this particular example, we formulate three running-cost functions:
     # goal-tracking cost, state and control regularization; and one terminal-cost:
@@ -40,11 +41,20 @@ def arm_manipulation_problem(T):
 
     framePlacementResidual = crocoddyl.ResidualModelFramePlacement(
         state,
-        robot_model.getFrameId("j2s6s200_end_effector"),
-        pinocchio.SE3(np.eye(3), np.array([0.6, 0.2, 0.5])),
+        # robot_model.getFrameId("j2s6s200_end_effector"), # This is for kinova
+        robot_model.getFrameId("ee_link"),  # This is for ur5
+        pinocchio.SE3(np.eye(3), np.array([0.3, 0.3, 0.3])),
         nu,
     )
-    #frameTranslationResidual = crocoddyl.ResidualModelFrameTranslation(state,robot_model.getFrameId("j2s6s200_end_effector"), np.array([0.2, 0.2, 0.5]))
+
+    # framePlacementResidual = crocoddyl.ResidualModelFrameTranslation(
+    #     state,
+    #     # robot_model.getFrameId("j2s6s200_end_effector"), # This is for kinova
+    #     robot_model.getFrameId("ee_link"),  # This is for ur5
+    #     np.array([0.3, 0.3, 0.3]),
+    #     nu,
+    # )
+    # frameTranslationResidual = crocoddyl.ResidualModelFrameTranslation(state,robot_model.getFrameId("j2s6s200_end_effector"), np.array([0.2, 0.2, 0.5]))
 
     uResidual = crocoddyl.ResidualModelControl(state, nu)
     xResidual = crocoddyl.ResidualModelState(state, x0, nu)
@@ -53,10 +63,10 @@ def arm_manipulation_problem(T):
     uRegCost = crocoddyl.CostModelResidual(state, uResidual)
 
     # Then let's added the running and terminal cost functions
-    runningCostModel.addCost("gripperPose", goalTrackingCost, 100)
-    #runningCostModel.addCost("xReg", xRegCost, 1e-1)
-    #runningCostModel.addCost("uReg", uRegCost, 1e-1)
-    terminalCostModel.addCost("gripperPose", goalTrackingCost, 100)
+    runningCostModel.addCost("gripperPose", goalTrackingCost, 1000)
+    runningCostModel.addCost("xReg", xRegCost, 1e-1)
+    runningCostModel.addCost("uReg", uRegCost, 1e-2)
+    terminalCostModel.addCost("gripperPose", goalTrackingCost, 1000)
 
     # Next, we need to create an action model for running and terminal knots. The
     # forward dynamics (computed using ABA) are implemented

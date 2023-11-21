@@ -1,0 +1,12 @@
+The value of /miu represent the sensitivity of the constraints (i.e. how strong is the gradient along the direction which satisfy the constraints)
+Question: 
+for the Augmented Lagrangian method:
+How to find a proper initialization and updating scheme of miu 
+that could achieve the balance between the satisfication of the constraints and the convergence of the cost?
+
+for the Multiple shooting:
+All the variants of gradient descent actually just provide a good search direction in our case.
+A good (step length selection algorithm) line search algorithm is likely to be very important.
+
+BCL -> good when the DOF is relatively small.
+LCL -> good when the number of constraints is small.

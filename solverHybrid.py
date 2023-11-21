@@ -1,6 +1,4 @@
 import pdb
-import sys
-sys.path.append('..')
 import pinocchio as pin
 import crocoddyl
 import numpy as np
@@ -8,7 +6,8 @@ from bullet_utils.env import BulletEnvWithGround
 from robot_properties_kuka.iiwaWrapper import IiwaRobot
 import pybullet as p
 import mpc_utils
-# from solverILQR import SolverILqr
+from solverILQR import SolverILqr
+from solverLBGFS_vectorized import SolverLBGFS
 from solverGD import SolverGD
 
 import matplotlib.pyplot as plt
@@ -17,33 +16,29 @@ from solverADAM_lineSearch import SolverADAM
 from solverAMSGRAD import SolverAMSGRAD
 from solverNADAM import SolverNADAM
 from solverADAN_lineSearch import SolverADAN
-from solverMultipleShooting import SolverMS
-from SolverMultipleShooting_lineSearch import SolverMSls
 
 import time
 
 np.set_printoptions(precision=4, linewidth=180)
 
-def solveOCP(solver, x_curr, xs_init, us_init, targets, maxIter, alpha=None, warm_start=True):
+def solveOCP(solver, x_curr, us_prev, targets, maxIter, alpha=None):
     solver.problem.x0 = x_curr
 
-    if warm_start:
-    # warm start
-        us_init = list(us_init[1:]) + [us_init[-1]]
-        xs_init = list(xs_init[1:]) + [xs_init[-1]]
-        xs_init[0] = x_curr
+    us_init = list(us_prev[1:]) + [us_prev[-1]]
+    xs_init = list(solver.xs[1:]) + [solver.xs[-1]]
+    xs_init[0] = x_curr
 
     # Get OCP nodes
     models = list(solver.problem.runningModels) + [solver.problem.terminalModel]
     for k, model in enumerate(models):
         model.differential.costs.costs["translation"].active = True
         model.differential.costs.costs["translation"].cost.residual.reference = targets[k]
-        model.differential.costs.costs["translation"].weight = 1000
+        model.differential.costs.costs["translation"].weight = 100
 
     if alpha is None:
-        solver.solve(xs_init, us_init, maxIter)
+        solver.solve(xs_init, us_init, maxIter, False)
     else:
-        solver.solve(xs_init, us_init, maxIter, alpha)
+        solver.solve(xs_init, us_init, maxIter, False, alpha)
     # calculating cost of the current node
     u_curr = solver.us[0]
     runningModel0 = solver.problem.runningModels[0]
@@ -60,20 +55,13 @@ def solveOCP(solver, x_curr, xs_init, us_init, targets, maxIter, alpha=None, war
 
 def circleTraj(T, t, dt):
     pi = np.pi
-   
-    # orientation = pin.Quaternion(np.array([pi, 0., 0., 1.]))
-    # orientation = np.eye(3)
-    # target = [pin.SE3(orientation, np.array([.4 + (.1 * np.cos(pi * (t + j*dt))),
-    #                                        .2 + (.1 * np.sin(pi * (t + j*dt))),
-    #                                        .3 + (.1 * np.sin(pi * (t + j*dt)))
-    #                                        ])) for j in range(T + 1)]
-    targets = np.zeros([T + 1, 3])
+    target = np.zeros([T + 1, 3])
     for j in range(T + 1):
-        targets[j, 0] = .4 + (.1 * np.cos(pi * (t + j*dt)))
-        targets[j, 1] = .2 + (.1 * np.sin(pi * (t + j*dt)))
-        targets[j, 2] = .3 + (.1 * np.sin(pi * (t + j*dt)))
+        target[j, 0] = .4 + (.1 * np.cos(pi * (t + j*dt)))
+        target[j, 1] = .2 + (.1 * np.sin(pi * (t + j*dt)))
+        target[j, 2] = .3
 
-    return targets
+    return target
 
 
 if __name__ == '__main__':
@@ -96,13 +84,6 @@ if __name__ == '__main__':
     ee_translation = np.array([.4, .2, .3])
 
     frameTranslationResidual = crocoddyl.ResidualModelFrameTranslation(state, ee_frame_id, ee_translation)
-
-    # frameTranslationResidual = crocoddyl.ResidualModelFramePlacement(
-    #     state,
-    #     ee_frame_id,  # This is for ur5
-    #     pin.SE3(np.eye(3), ee_translation),
-    # )
-
     frameTranslationCost = crocoddyl.CostModelResidual(state, frameTranslationResidual)
     uResidual = crocoddyl.ResidualModelControlGrav(state)
     uRegCost = crocoddyl.CostModelResidual(state, uResidual)
@@ -110,10 +91,10 @@ if __name__ == '__main__':
     xRegCost = crocoddyl.CostModelResidual(state, xResidual)
     runningCostModel.addCost("stateReg", xRegCost, 1e-1)
     runningCostModel.addCost("ctrlRegGrav", uRegCost, 1e-4)
-    runningCostModel.addCost("translation", frameTranslationCost, 1000)
+    runningCostModel.addCost("translation", frameTranslationCost, 100)
 
     terminalCostModel.addCost("stateReg", xRegCost, 1e-1)
-    terminalCostModel.addCost("translation", frameTranslationCost, 1000)
+    terminalCostModel.addCost("translation", frameTranslationCost, 100)
 
     running_DAM = crocoddyl.DifferentialActionModelFreeFwdDynamics(state, actuation, runningCostModel)
     terminal_DAM = crocoddyl.DifferentialActionModelFreeFwdDynamics(state, actuation, terminalCostModel)
@@ -123,19 +104,18 @@ if __name__ == '__main__':
     T = 30
     problem = crocoddyl.ShootingProblem(x0, [runningModel] * T, terminalModel)
 
-    ddp = crocoddyl.SolverFDDP(problem)
+    ddp = crocoddyl.SolverDDP(problem)
 
+    ilqr = SolverILqr(problem)
+    lbfgs = SolverLBGFS(problem, memory_length=30)
     gd = SolverGD(problem)
     nag = SolverNAG(problem)
     adam = SolverADAM(problem)
     NAdam = SolverNADAM(problem)
     amsGrad = SolverAMSGRAD(problem)
     adan = SolverADAN(problem)
-    ms = SolverMS(problem)
-    ms_ls = SolverMSls(problem)
 
-
-    time_ = 10.
+    time_ = 2.
     t = 0.
     dt_sim = env.dt  # 1e-3
     sim_freq = 1/dt_sim
@@ -148,7 +128,7 @@ if __name__ == '__main__':
     xs_init = [x0 for i in range(T + 1)]
     us_init = ddp.problem.quasiStatic(xs_init[:-1])
     targets = circleTraj(T, t, dt_ocp)
-    us, xs, runningCost, totalCost, kkt = solveOCP(ddp, x0, xs_init, us_init, targets, 100)
+    us, xs, runningCost, totalCost, kkt = solveOCP(ddp, x0, us_init, targets, 1000)
     us = np.array(us)
     xs = np.array(xs)
 
@@ -167,28 +147,23 @@ if __name__ == '__main__':
 
     log_rate = 100
     #alpha = 1.
-    solver = ddp
-    solver.bias_correction = True
-    solver.refresh = False
+    solver = adam
     solver.Beta1 = .9
     solver.Beta2 = .999
-    alpha = None
     # solver.Beta3 = .999
     # solver.decay1 = 1.
     # solver.decay2 = 1.
     # solver.decay3 = 1.
-
+    solver.bias_correction = True
+    solver.refresh = False
     for i in range(num_step):
 
         tau_gravity = pin.rnea(pin_robot.model, pin_robot.data, q_measured, np.zeros_like(q_measured), np.zeros_like(q_measured))
 
         if i % (int(sim_freq / mpc_freq)) == 0:
             targets = circleTraj(T, t, dt_ocp)
-            maxIter = 100
-            us, xs, runningCost, totalCost, kkt = solveOCP(solver, x_measured, solver.xs, us, targets, maxIter, alpha)
-
-            # us, xs, runningCost, totalCost, kkt = solveOCP(ddp, x_measured, list(xs), list(us), targets, 1, alpha, False)
-
+            maxIter = 10
+            us, xs, runningCost, totalCost, kkt = solveOCP(solver, x_measured, us, targets, maxIter)#, alpha)
             runningCosts.append(runningCost)
             totalCosts.append(totalCost)
             KKTs.append(kkt)
@@ -264,9 +239,9 @@ if __name__ == '__main__':
     # Set the figure size
     fig1, (ax1, ax2, ax3, ax4, ax5, ax6) = plt.subplots(6, sharex=True, figsize=(10, 15))
 
-    # fig1.suptitle(f'online Metrics, Single Shooting, T={T}; '
-    #               f'Betas={solver.Beta1, solver.Beta2}\n Max_iteration={maxIter};'
-    #               f'Bias_correction = {solver.bias_correction}; Refresh_moments = {solver.refresh}', fontsize=16)
+    fig1.suptitle(f'online Metrics, Sovler={solver}, '
+                  f'Betas={solver.Beta1, solver.Beta2}\n Max_iteration={maxIter},'
+                  f'Bias_correction = {solver.bias_correction}, Refresh_moment = {solver.refresh}', fontsize=16)
 
     start = 0
     color = 'tab:blue'
@@ -306,7 +281,7 @@ if __name__ == '__main__':
     ax6.set_xlabel('time step')  # Set the x-axis label
     ax6.grid(True)
 
-    plt.savefig(f'../experiment/kuka_drawingcircle_mpc/ddp_mpc2.png')
+    plt.savefig(f'plots/online/ADAM_online_withLineSearch0.png')
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.95)
@@ -314,5 +289,4 @@ if __name__ == '__main__':
     print(f'line search fail: {solver.fail_ls}')
     print(f'guess accepted: {sum(solver.guess_accepted)}')
     print(f'line search failed: {sum(solver.lineSearch_fail)}')
-    print(f'Average of alpha: {np.mean(solver.alphas)}')
 

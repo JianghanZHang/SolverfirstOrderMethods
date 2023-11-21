@@ -1,0 +1,14 @@
+{
+    "miu" : 2,
+    "gamma" : 2,
+    "gradientThreshold" : 10,
+    "gradientThresholdDecay" : 1,
+    "constraintThreshold" : 4.0,
+    "constraintThresholdDecay" : 0.9,
+    "alpha" : 0.1,
+    "T" : 20,
+    "maxInnerIterations" : 3000,
+    "maxOuterIterations" : 20,
+    "NX" : 6,
+    "NU" : 6
+}

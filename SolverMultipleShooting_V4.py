@@ -23,7 +23,7 @@ def raiseIfNan(A, error=None):
     if np.any(np.isnan(A)) or np.any(np.isinf(A)) or np.any(abs(np.asarray(A)) > 1e30):
         raise error
 
-class SolverADAM(SolverAbstract):
+class SolverMSls(SolverAbstract):
     def __init__(self, shootingProblem):
         SolverAbstract.__init__(self, shootingProblem)
         self.cost = 0.
@@ -40,7 +40,8 @@ class SolverADAM(SolverAbstract):
         self.n_little_improvement = 0
         self.c1 = 1e-4
         self.c2 = .9
-        self.c = 0.2
+        self.c =  0.25
+        self.c_ = 1e-4
         self.past_grad = 0.
         self.curr_grad = 0.
         self.change = 0.
@@ -73,51 +74,114 @@ class SolverADAM(SolverAbstract):
         for t, (model, data) in rev_enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
             self.dJdu[t, :] = data.Lu + self.dJdx[t + 1, :] @ data.Fu
             self.dJdx[t, :] = data.Lx + self.dJdx[t + 1, :] @ data.Fx
+            
 
         self.Qu = self.dJdu
-        self.kkt = linalg.norm(self.Qu, 2)
+        self.kkt = linalg.norm(np.hstack((self.Qu, self.gap[1:])), np.inf)
+        # self.kkt = linalg.norm(self.Qu, np.inf)
         self.KKTs.append(self.kkt)
 
+        if np.any(self.dJdu) > 1e6 or np.any(self.update_u) > 1e6:
+            pdb.set_trace()
+        
     def forwardPass(self, alpha, i):
-        cost_try = 0.
 
-        self.m_p = self.m.copy()
-        self.v_p = self.v.copy()
+        self.m_p = self.m.copy() 
+        self.v_p = self.v.copy() 
+        self.gap_p = self.gap.copy()
 
-        self.m = self.Beta1 * self.m + (1 - self.Beta1) * (self.dJdu)
-        self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu ** 2)
+        ###########################Adam#############################
+        # self.m = self.Beta1 * self.m + (1 - self.Beta1) * (self.dJdu[1:])
+        # self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu[1:] ** 2)
+        self.m_x = self.Beta1 * self.m_x + (1 - self.Beta1) * (self.dJdx)
+        self.v_x = self.Beta2 * self.v_x + (1 - self.Beta2) * (self.dJdx ** 2)
         if self.bias_correction:
-            m_corrected = self.m / (1 - self.Beta1 ** (i + 2))
-            v_corrected = self.v / (1 - self.Beta2 ** (i + 2))
+            m_corrected = self.m_x / (1 - self.Beta1 ** (i + 2))
+            v_corrected = self.v_x / (1 - self.Beta2 ** (i + 2))
         else:
-            m_corrected = self.m
-            v_corrected = self.v
+            m_corrected = self.m_x
+            v_corrected = self.v_x
 
-        self.update = -m_corrected / (np.sqrt(v_corrected) + self.eps)
-        us = np.array(self.us)
-        us_try = us + alpha * self.update
-        self.us_try = list(us_try)
+        self.update_x[1:] = -m_corrected[1:] / (np.sqrt(v_corrected[1:]) + self.eps)
+        # pdb.set_trace()
+        # self.update_u = alpha * self.update_u
+        #############################################################
+
+        ######################Pure Gradient Descent##################
+        # self.update_u = alpha * self.dJdu
+        #############################################################
+        
+        ########################NADAM################################
+        # self.m = self.Beta1 * self.m + (1 - self.Beta1) * self.dJdu
+        # self.v = self.Beta2 * self.v + (1 - self.Beta2) * (self.dJdu**2)
+        # grad_corrected = self.dJdu / (1 - self.Beta1 ** (i+1))
+        # m_corrected = self.Beta1 * (self.m / (1 - self.Beta1 ** (i+2))) + (1-self.Beta1) * grad_corrected
+        # v_corrected = (self.Beta2 * self.v) / (1 - self.Beta2 ** (i+2))
+        # self.update_u = alpha * m_corrected / (np.sqrt(v_corrected) + self.eps)
+        ###########################################################
+
+        ####################Nesterov accelerated gradient############       
+        # us = np.array(self.us)
+        # us_p = np.array(self.us_p)
+        # self.s_p = self.s
+        # self.s = -alpha * self.dJdu
+        # self.v = us - us_p
+        # us_try = us + (1+self.mu) * self.s - self.mu * self.s_p + self.mu * self.v
+        # self.us_try = list(us_try)
+        # pdb.set_trace()
+        ##############################################################
+
+        # print(f"dJdu: \n{self.dJdu}")
+        # print(f"update_u: \n{self.update_u}")
+        # print(f"gap: \n{self.gap}")
+        # print(f"dJdx: \n{self.dJdx}")
+
+        xs = np.array(self.xs)
+        xs_try = xs + (alpha * self.update_x)
+        self.xs_try = list(xs_try)
+
+        self.cost_try = 0.
         self.curvature_0 = 0.
-
+        
         for t, (model, data) in enumerate(zip(self.problem.runningModels, self.problem.runningDatas)):
-            model.calc(data, self.xs_try[t], self.us_try[t])
-            self.xs_try[t + 1] = data.xnext
-            cost_try += data.cost
-            self.curvature_0 += self.dJdu[t, :].T @ self.update[t, :]
+            self.curvature_0 += self.dJdu[t, :].T @ self.update_u[t, :]
+            # pdb.set_trace()
 
+            # self.update_x[t+1] = (data.Fx @ self.update_x[t] + data.Fu @ (alpha * self.update_u[t]) + self.gap[t+1])
+            B_inv = np.linalg.pinv(data.Fu)
+            self.update_u[t] = B_inv @ (self.update_x[t+1] - data.Fx @ self.update_x[t] - self.gap[t+1])
+            self.us_try[t] = self.us[t] + self.update_u[t]
+            model.calc(data, self.xs_try[t], self.us_try[t])
+            self.gap[t+1] = data.xnext - self.xs_try[t+1]
+            self.cost_try += data.cost
+
+        # if i == 5:
+            # pdb.set_trace()
         self.problem.terminalModel.calc(self.problem.terminalData, self.xs_try[-1])
 
-        cost_try += self.problem.terminalData.cost
+        self.cost_try += self.problem.terminalData.cost
 
-        return cost_try
+        return self.cost_try
 
     def tryStep(self, alpha, i):
         self.direction_p = self.direction
         self.cost_try = self.forwardPass(alpha, i)
 
         return self.cost - self.cost_try
+    
+    def getCost(self):
+        xs_temp = self.problem.rollout(self.us)
+        # self.setCandidate(xs_temp, self.us)
+        cost = self.problem.calc(xs_temp, self.us)
+        return cost
+    
+    def getCost_try(self):
+        xs_temp = self.problem.rollout(self.us_try)
+        # self.setCandidate(xs_temp, self.us)
+        cost = self.problem.calc(xs_temp, self.us)
+        return cost
 
-    def solve(self, init_xs=None, init_us=None, maxIter=100, isFeasible=False):
+    def solve(self, init_xs=None, init_us=None, maxIter=100):
         # ___________________ Initialize ___________________#
         if init_xs is None:
             init_xs = [np.zeros(m.state.nx) for m in self.models()]
@@ -127,8 +191,8 @@ class SolverADAM(SolverAbstract):
         init_xs[0][:] = self.problem.x0.copy()  # Initial condition guess must be x0
         self.xs_try[0][:] = self.problem.x0.copy()
 
-        if not isFeasible:
-            init_xs = self.problem.rollout(init_us)
+        # init_xs = self.problem.rollout(init_us)
+        
 
         self.setCandidate(init_xs, init_us, False)
         # pdb.set_trace()
@@ -142,17 +206,22 @@ class SolverADAM(SolverAbstract):
         # print("initial cost is %s" % self.cost)
 
         for i in range(maxIter):
+            # print('Iteration', i)
+
+            # if i % 20 == 0:
+            #     self.refresh_()
+            #     print('Refreshed')
+
             self.numIter = i
-            self.guess = 16.  # min(2 * self.alpha_p, 1)
-            self.alpha = self.guess
+            # self.guess = 16.0 
+            self.alpha = 16.0
             recalc = True  # this will recalculate derivatives in computeDirection
-            while True:  # backward pass
-                try:
+            while True:  # backward pass                            
+                try:    
                     self.computeDirection(recalc=recalc)
 
                 except:
                     print('In', i, 'th iteration.')
-                    # import pdb; pdb.set_trace()
                     raise BaseException("Backward Pass Failed")
                 break
 
@@ -170,60 +239,75 @@ class SolverADAM(SolverAbstract):
                         raise BaseException('FP failed')
                     break
 
-                # if self.cost_try <= self.cost + self.c1 * self.alpha * self.curvature_0:
-
+                # Goldstein conditions
                 ub = self.cost + self.c * self.alpha * self.curvature_0
                 lb = self.cost + (1 - self.c) * self.alpha * self.curvature_0
                 # print(f'alpha = {self.alpha}')
                 # print(f'lb = {lb}, ub = {ub}')
                 # print(f'cost_try = {self.cost_try}, cost = {self.cost}')
-                # # print(f'True cost:{self.getCost_try()}\n')
+                # print(f'True cost:{self.getCost_try()}\n')
                 # print(f'x[-1]={self.xs_try[-1]}\n')
                 if  lb <= self.cost_try <= ub:
+
+                # Wolfe conditions
+                # if self.cost_try <= self.cost + self.c_ * self.alpha * self.curvature_0:
                     # line search succeed -> exit
-                    if self.alpha == self.guess:
-                        self.guess_accepted.append(True)
-                    else:
-                        self.guess_accepted.append(False)
+
+                # custom conditions
+                # if self.cost_try <= self.cost and self.Infeasibilities[-1] < self.Infeasibilities[-2]:
+                    self.Infeasibilities.append(np.linalg.norm(self.gap, 2))
+                    # if self.alpha == self.guess:
+                    #     self.guess_accepted.append(True)
+                    # else:
+                    #     self.guess_accepted.append(False)
                     self.lineSearch_fail.append(False)
                     self.setCandidate(self.xs_try, self.us_try, True)
                     self.cost = self.cost_try
-                    self.costs.append(self.cost)
+                    self.costs.append(self.getCost())
                     self.alpha_p = self.alpha
                     self.alphas.append(self.alpha)
-                    self.updates.append(np.linalg.norm(self.alpha * self.update, ord=2))
+                    # self.updates.append(np.linalg.norm(self.alpha * self.update, ord=2))
                     self.curvatures.append(self.curvature_0)
+                    self.step_norm.append(np.linalg.norm(self.update_u, ord=2))
 
-                    # print(f'at {i} th iteration, Line search succeed with alpha = {self.alpha}')
+                    print(f'at {i} th iteration, Line search succeed with alpha = {self.alpha}')
+                    self.u_magnitude.append(np.linalg.norm(self.us, 2))
+
+                    # print(f'lb = {lb}, ub = {ub}')
+                    # print(f'cost_try = {self.cost_try}, cost = {self.cost}')
+                    # print(f'True cost:{self.getCost()}\n')
                     break
 
-                elif self.alpha <= .01:
+                elif self.alpha <= 0.1:
                     # keep going anyway
+                    self.Infeasibilities.append(np.linalg.norm(self.gap, 2))
                     self.lineSearch_fail.append(True)
                     self.guess_accepted.append(False)
                     self.setCandidate(self.xs_try, self.us_try, True)
                     self.cost = self.cost_try
-                    self.costs.append(self.cost)
+                    self.costs.append(self.getCost())
                     self.alpha_p = self.alpha
                     self.fail_ls += 1
-                    self.alphas.append(self.alpha)
-                    self.updates.append(np.linalg.norm(self.alpha * self.update, ord=2))
+                    # self.alphas.append(self.alpha)
+                    # self.updates.append(np.linalg.norm(self.alpha * self.update, ord=2))
                     self.curvatures.append(self.curvature_0)
-
-                    # print(f'at {i} th iteration, Line search failed with alpha = {self.alpha}')
-
+                    self.step_norm.append(np.linalg.norm(self.update_u, ord=2))
+                    self.u_magnitude.append(np.linalg.norm(self.us, 2))
+                    
+                    print(f'at {i} th iteration, Line search failed')
                     break
 
                 else:
                     # restore momentum terms
-                    self.alpha *= .5
-                    self.m = self.m_p.copy()
-                    self.v = self.v_p.copy()
+                    self.alpha *= 0.5
+                    self.m = self.m_p.copy() 
+                    self.v = self.v_p.copy() 
+                    self.gap = self.gap_p.copy()
 
-            if self.alpha == self.guess:
-                self.guess_accepted.append(True)
-            else:
-                self.guess_accepted.append(False)
+            # if self.alpha == self.guess:
+            #     self.guess_accepted.append(True)
+            # else:
+            #     self.guess_accepted.append(False)
 
             self.stoppingCriteria()
 
@@ -270,6 +354,13 @@ class SolverADAM(SolverAbstract):
         self.xs_try = [np.zeros(m.state.nx) for m in self.models()]
         self.xs_try[0][:] = self.problem.x0.copy()
         self.us_try = [np.zeros(m.nu) for m in self.problem.runningModels]
+        self.gap = np.array([np.zeros(m.state.ndx) for m in self.models()])
+        self.update_u = np.array([np.zeros(m.nu) for m in self.problem.runningModels])
+        self.update_x = np.array([np.zeros(m.state.ndx) for m in self.models()])
+        self.m_x = np.array([np.zeros(m.state.ndx) for m in self.models()])
+        self.v_x = np.array([np.zeros(m.state.ndx) for m in self.models()])
+    
+        self.Infeasibilities = []
         self.dJdu = np.array([np.zeros([m.nu]) for m in self.problem.runningModels])
         self.dJdx = np.array([np.zeros(m.state.ndx) for m in self.models()])
         self.alpha_p = 0
@@ -287,6 +378,7 @@ class SolverADAM(SolverAbstract):
         self.m = np.zeros_like(self.dJdu)
         self.v = np.zeros_like(self.dJdu)
         self.n = np.zeros_like(self.dJdu)
+        self.u_magnitude = []
         self.Beta1 = .7
         self.Beta2 = .8
         self.Beta3 = .999
@@ -295,7 +387,7 @@ class SolverADAM(SolverAbstract):
         self.KKTs = []
         self.costs = []
         self.numIter = 0
-        self.bias_correction = False
+        self.bias_correction = True
         self.refresh = False
         self.updates = []
         self.curvatures = []
@@ -306,5 +398,6 @@ class SolverADAM(SolverAbstract):
         self.decay3 = 1.
         self.lineSearch_fail = []
         self.alphas = []
+        self.step_norm = []
 
 
